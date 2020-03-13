@@ -35,7 +35,7 @@ class Solver(object):
 
     def build(self, part_name):
         self.d = Discriminator1(784 + self.latent_dim).to(device)  #Discriminator().to(device)
-        self.e = TestEncoder(self.latent_dim).to(device)  # Encoder1(784, self.latent_dim).to(device) # Encoder().to(device)
+        self.e = Encoder1(784, self.latent_dim).to(device) # Encoder().to(device)
         self.g = Generator1(self.latent_dim, 784).to(device)  #Generator().to(device)
         self.d_optimizer = torch.optim.Adam(self.d.parameters(), lr=2e-4, betas=(0.5, 0.999), weight_decay=2.5e-5)
         self.g_optimizer = torch.optim.Adam(list(self.e.parameters()) + list(self.g.parameters()), lr=2e-4, betas=(0.5, 0.999), weight_decay=2.5e-5)
@@ -77,8 +77,8 @@ class Solver(object):
                 # do a minibatch update
                 self.d_optimizer.zero_grad()
 
-                z_fake = torch.normal(torch.zeros(x.shape[0], self.latent_dim), torch.ones(x.shape[0], self.latent_dim)).to(device)
-                # z_fake = torch.rand(x.shape[0], self.latent_dim).to(device) * 2 - 1
+                # z_fake = torch.normal(torch.zeros(x.shape[0], self.latent_dim), torch.ones(x.shape[0], self.latent_dim)).to(device)
+                z_fake = (torch.rand(x.shape[0], self.latent_dim).to(device) - 0.5) * 2
                 z_real = self.e(x).reshape(x.shape[0], self.latent_dim)
                 x_fake = self.g(z_fake).reshape(x.shape[0], -1)
                 x_real = x.view(x.shape[0], -1)
@@ -86,22 +86,19 @@ class Solver(object):
                 z_fake = torch.zeros_like(z_fake).to(device)  #todo: for testing if my gan is broken
                 z_real = torch.zeros_like(z_real).to(device)
 
-                reals = torch.cat((z_real, x_real), dim=1)
-                fakes = torch.cat((z_fake, x_fake), dim=1)
-                d_loss = - (self.d(reals)).log().mean() - (1 - self.d(fakes)).log().mean()
+                d_loss = - 0.5 * (self.d(z_real, x_real)).log().mean() - 0.5 * (1 - self.d(z_fake, x_fake)).log().mean()
                 d_loss.backward()
                 self.d_optimizer.step()
                 for _ in range(1):
                     self.g_optimizer.zero_grad()
-                    z_fake = torch.normal(torch.zeros(x.shape[0], self.latent_dim),
-                                          torch.ones(x.shape[0], self.latent_dim)).to(device)
-                    # z_fake = torch.rand(x.shape[0], self.latent_dim).to(device) * 2 - 1
+                    # z_fake = torch.normal(torch.zeros(x.shape[0], self.latent_dim),
+                    #                       torch.ones(x.shape[0], self.latent_dim)).to(device)
+                    z_fake = (torch.rand(x.shape[0], self.latent_dim).to(device) - 0.5) * 2
                     x_fake = self.g(z_fake).view(x.shape[0], -1)
                     z_fake = torch.zeros_like(z_fake).to(device)  #todo: testing if gan is broken
-                    fakes = torch.cat((z_fake, x_fake), dim=1)
 
                     # g_loss = (1 - self.d(fakes)).log().mean()
-                    g_loss = - (self.d(fakes)).log().mean()
+                    g_loss = - (self.d(z_fake, x_fake)).log().mean()
                     g_loss.backward()
                     self.g_optimizer.step()
 
@@ -129,8 +126,8 @@ class Solver(object):
 
     def sample(self, n, filename):
         self.g.eval()
-        z = torch.normal(torch.zeros(n, self.latent_dim), torch.ones(n, self.latent_dim)).to(device)
-        # z = torch.rand(n, self.latent_dim).to(device) * 2 - 1
+        # z = torch.normal(torch.zeros(n, self.latent_dim), torch.ones(n, self.latent_dim)).to(device)
+        z = (torch.rand(n, self.latent_dim).to(device) - 0.5) * 2
         samples = self.g(z).reshape(-1, 1, 28, 28) * 0.5 + 1
         save_image(samples, filename, nrow=10, normalize=True)
 
@@ -157,7 +154,7 @@ class Solver(object):
 
 
 if __name__ == "__main__":
-    solver = Solver(n_epochs=100, batch_size=128, train_data_amount=1, latent_dim=192)
+    solver = Solver(n_epochs=100, batch_size=128, train_data_amount=1, latent_dim=32)
     solver.build("bigan")
     solver.train()
     IPython.embed()
