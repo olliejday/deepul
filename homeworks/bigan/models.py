@@ -146,7 +146,7 @@ class Generator(nn.Module):
         # # foundation for 7x7 image
         # n_nodes = 128 * 7 * 7
 
-        self.fc = nn.Sequential(nn.Linear(192, 128 * 7 * 7),
+        self.fc = nn.Sequential(nn.Linear(50, 128 * 7 * 7),
                             nn.LeakyReLU(negative_slope=0.2))
 
         self.convs = nn.Sequential(
@@ -155,7 +155,7 @@ class Generator(nn.Module):
             nn.ConvTranspose2d(128, 128, kernel_size=4, stride=2, padding=1),
             nn.LeakyReLU(negative_slope=0.2),
             nn.Conv2d(128, 1, kernel_size=7, stride=1, padding=3),
-            nn.Tanh()
+            nn.Sigmoid()
         )
         # model.add(Dense(n_nodes, input_dim=latent_dim))
         # model.add(LeakyReLU(alpha=0.2))
@@ -180,25 +180,52 @@ class Generator1(nn.Module):
         self.fc2 = nn.Linear(self.fc1.out_features, self.fc1.out_features * 2)
         self.fc3 = nn.Linear(self.fc2.out_features, self.fc2.out_features * 2)
         self.fc4 = nn.Linear(self.fc3.out_features, g_output_dim)
+        # self.fc1.weight.data.normal_(0, 0.02)
+        # self.fc2.weight.data.normal_(0, 0.02)
+        # self.fc3.weight.data.normal_(0, 0.02)
+        # self.fc4.weight.data.normal_(0, 0.02)
+        # self.fc = nn.Sequential(
+        #     nn.Linear(g_input_dim, 1024),
+        #     nn.ReLU(),
+        #     nn.Linear(1024, 1024),
+        #     nn.BatchNorm1d(1024, affine=False),
+        #     nn.ReLU(),
+        #     nn.Linear(1024, 784),
+        #     nn.Sigmoid()
+        # )
+
 
     # forward method
     def forward(self, x):
+        # return self.fc(x)
         x = F.leaky_relu(self.fc1(x), 0.2)
         x = F.leaky_relu(self.fc2(x), 0.2)
         x = F.leaky_relu(self.fc3(x), 0.2)
-        return torch.tanh(self.fc4(x)).reshape(x.shape[0], 1, 28, 28)
+        return torch.tanh(self.fc4(x)).reshape(x.shape[0], 1, 28, 28) # tanh
 
 class Discriminator1(nn.Module):
     def __init__(self, d_input_dim):
         super(Discriminator1, self).__init__()
+        # self.fc = nn.Sequential(
+        #     nn.Linear(d_input_dim, 64),
+        #     nn.LeakyReLU(0.2),
+        #     nn.Linear(64, 64),
+        #     # nn.BatchNorm1d(1024, affine=False),
+        #     nn.LeakyReLU(0.2),
+        #     nn.Linear(64, 1),
+        #     nn.Sigmoid()
+        # )
         self.fc1 = nn.Linear(d_input_dim, 1024)
         self.fc2 = nn.Linear(self.fc1.out_features, self.fc1.out_features // 2)
         self.fc3 = nn.Linear(self.fc2.out_features, self.fc2.out_features // 2)
         self.fc4 = nn.Linear(self.fc3.out_features, 1)
+        # for param in self.parameters():
+        #     param.data.normal_(0, 0.02)
 
     # forward method
     def forward(self, x):
-        x = x.view(x.shape[0], -1)
+        # x = x.view(x.shape[0], -1)
+        # return self.fc(x)
         x = F.leaky_relu(self.fc1(x), 0.2)
         x = F.dropout(x, 0.3)
         x = F.leaky_relu(self.fc2(x), 0.2)
@@ -207,5 +234,47 @@ class Discriminator1(nn.Module):
         x = F.dropout(x, 0.3)
         return torch.sigmoid(self.fc4(x))
 
+class Encoder1(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(Encoder1, self).__init__()
+        # self.fc = nn.Sequential(
+        #     nn.Linear(d_input_dim, 1024),
+        #     nn.LeakyReLU(0.2),
+        #     nn.Linear(1024, 1024),
+        #     nn.BatchNorm1d(1024, affine=False),
+        #     nn.LeakyReLU(0.2),
+        #     nn.Linear(1024, 50),
+        #     nn.Tanh()
+        # )
+        self.fc1 = nn.Linear(input_dim, 1024)
+        self.fc2 = nn.Linear(self.fc1.out_features, self.fc1.out_features // 2)
+        self.fc3 = nn.Linear(self.fc2.out_features, self.fc2.out_features // 2)
+        self.fc4 = nn.Linear(self.fc3.out_features, output_dim)
+        # self.fc1.weight.data.normal_(0, 0.02)
+        # self.fc2.weight.data.normal_(0, 0.02)
+        # self.fc3.weight.data.normal_(0, 0.02)
+        # self.fc4.weight.data.normal_(0, 0.02)
+
+
+    # forward method
+    def forward(self, x):
+        x = x.view(x.shape[0], -1)
+        # return self.fc(x)
+        x = F.leaky_relu(self.fc1(x), 0.2)
+        x = F.dropout(x, 0.3)
+        x = F.leaky_relu(self.fc2(x), 0.2)
+        x = F.dropout(x, 0.3)
+        x = F.leaky_relu(self.fc3(x), 0.2)
+        x = F.dropout(x, 0.3)
+        # return torch.tanh(self.fc4(x))
+        return self.fc4(x)
+
+class TestEncoder(nn.Module):
+    def __init__(self, latent_dim):
+        super().__init__()
+        self.latent_dim = latent_dim
+
+    def forward(self, x):
+        return torch.rand(x.shape[0], self.latent_dim).to(x.device) * 2 - 1
 
 

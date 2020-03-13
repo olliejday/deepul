@@ -17,13 +17,13 @@ import torchvision.transforms as transforms
 import IPython
 import math
 
-from models import LeNet, Encoder, Generator, Discriminator, Generator1, Discriminator1
+from models import LeNet, Encoder, Generator, Discriminator, Generator1, Discriminator1, Encoder1, TestEncoder
 
 device = torch.device("cuda:0")
 
 
 class Solver(object):
-    def __init__(self, n_epochs=100, batch_size=128, train_data_amount=1.0):
+    def __init__(self, n_epochs=100, batch_size=128, train_data_amount=1.0, latent_dim=50):
         self.log_interval = 100
         self.batch_size = batch_size
         self.train_data_amount = train_data_amount
@@ -31,19 +31,20 @@ class Solver(object):
         self.n_batches_in_epoch = len(self.train_loader)
         self.n_epochs = n_epochs
         self.curr_itr = 0
+        self.latent_dim = latent_dim
 
     def build(self, part_name):
-        self.d = Discriminator1(784).to(device)  #Discriminator().to(device)
-        self.e = Encoder().to(device)
-        self.g = Generator1(192, 784).to(device)  #Generator().to(device)
-        self.d_optimizer = torch.optim.Adam(self.d.parameters(), lr=2e-4, betas=(0.5, 0.999))
-        self.g_optimizer = torch.optim.Adam(list(self.e.parameters()) + list(self.g.parameters()), lr=2e-4, betas=(0.5, 0.999))
+        self.d = Discriminator1(784 + self.latent_dim).to(device)  #Discriminator().to(device)
+        self.e = TestEncoder(self.latent_dim).to(device)  # Encoder1(784, self.latent_dim).to(device) # Encoder().to(device)
+        self.g = Generator1(self.latent_dim, 784).to(device)  #Generator().to(device)
+        self.d_optimizer = torch.optim.Adam(self.d.parameters(), lr=2e-4, betas=(0.5, 0.999), weight_decay=2.5e-5)
+        self.g_optimizer = torch.optim.Adam(list(self.e.parameters()) + list(self.g.parameters()), lr=2e-4, betas=(0.5, 0.999), weight_decay=2.5e-5)
         self.part_name = part_name
 
     def create_loaders(self):
         transform = transforms.Compose([
             transforms.ToTensor(),
-            # transforms.Normalize((0.5,), (0.5,))
+            transforms.Normalize((0.5,), (0.5,))
         ])
 
         full_train_set = torchvision.datasets.MNIST(root="./data", train=True, download=True, transform=transform)
@@ -71,43 +72,38 @@ class Solver(object):
             for batch_i, (x, y) in enumerate(tqdm(self.train_loader, desc='Batch', ncols=80, leave=False)):
                 batch_i += 1
                 self.curr_itr += 1
-                if batch_i == 1:
-                    save_image(x.float(), 'real_samples.png', nrow=10, normalize=True)
-                x = x.to(device).float() * 2 - 1
-                # y = y.to(device)
+                x = x.to(device).float() # * 2 - 1
 
                 # do a minibatch update
                 self.d_optimizer.zero_grad()
 
-                z_fake = torch.normal(torch.zeros(x.shape[0], 192), torch.ones(x.shape[0], 192)).to(device)
-                z_real = self.e(x).reshape(x.shape[0], 192)
-                x_fake = self.g(z_fake)
-                x_real = x  # x.view(x.shape[0], -1)
+                z_fake = torch.normal(torch.zeros(x.shape[0], self.latent_dim), torch.ones(x.shape[0], self.latent_dim)).to(device)
+                # z_fake = torch.rand(x.shape[0], self.latent_dim).to(device) * 2 - 1
+                z_real = self.e(x).reshape(x.shape[0], self.latent_dim)
+                x_fake = self.g(z_fake).reshape(x.shape[0], -1)
+                x_real = x.view(x.shape[0], -1)
 
-                # reals = torch.cat((z_real, x_real), dim=1)
-                # reals = torch.cat((torch.zeros_like(z_real), x_real), dim=1)
-                reals = x_real
-                # fakes = torch.cat((z_fake, x_fake), dim=1)
-                # fakes = torch.cat((torch.zeros_like(z_fake), x_fake), dim=1)
-                fakes = x_fake
-                # print('here', reals.shape, fakes.shape)
+                z_fake = torch.zeros_like(z_fake).to(device)  #todo: for testing if my gan is broken
+                z_real = torch.zeros_like(z_real).to(device)
+
+                reals = torch.cat((z_real, x_real), dim=1)
+                fakes = torch.cat((z_fake, x_fake), dim=1)
                 d_loss = - (self.d(reals)).log().mean() - (1 - self.d(fakes)).log().mean()
-                # d_loss = (1 - self.d(reals) + 1e-8).log().mean() + (self.d(fakes) + 1e-8).log().mean()
                 d_loss.backward()
                 self.d_optimizer.step()
+                for _ in range(1):
+                    self.g_optimizer.zero_grad()
+                    z_fake = torch.normal(torch.zeros(x.shape[0], self.latent_dim),
+                                          torch.ones(x.shape[0], self.latent_dim)).to(device)
+                    # z_fake = torch.rand(x.shape[0], self.latent_dim).to(device) * 2 - 1
+                    x_fake = self.g(z_fake).view(x.shape[0], -1)
+                    z_fake = torch.zeros_like(z_fake).to(device)  #todo: testing if gan is broken
+                    fakes = torch.cat((z_fake, x_fake), dim=1)
 
-                if batch_i == 1:
-                    print(reals[0], fakes[0])
-
-                self.g_optimizer.zero_grad()
-                z_fake = torch.normal(torch.zeros(x.shape[0], 192)).to(device)
-                x_fake = self.g(z_fake)
-                fakes = x_fake
-                # fakes = torch.cat((torch.zeros_like(z_fake), x_fake), dim=1)
-
-                g_loss = - (self.d(fakes)).log().mean()
-                g_loss.backward()
-                self.g_optimizer.step()
+                    # g_loss = (1 - self.d(fakes)).log().mean()
+                    g_loss = - (self.d(fakes)).log().mean()
+                    g_loss.backward()
+                    self.g_optimizer.step()
 
                 self.batch_loss_history.append(d_loss.item())
 
@@ -115,7 +111,7 @@ class Solver(object):
                     log_string = f'Epoch: {epoch_i} | Itr: {self.curr_itr} | '
                     log_string += f'd_loss: {d_loss:.3f}'
                     tqdm.write(log_string)
-                # if self.curr_itr % 50000 == 0:  # todo: implement model saving with just the statedict
+                # if self.curr_itr % 50000 == 0:
                 #     self.save_model(f"{self.part_name}_epoch{self.curr_itr}.model")
             epoch_loss = np.mean(self.batch_loss_history)
             tqdm.write(f'Epoch Loss: {epoch_loss:.2f}')
@@ -123,6 +119,7 @@ class Solver(object):
             self.sample(100, f"{self.part_name}_samples{epoch_i}.png")
             np.save("train_losses.npy", np.array(train_losses))
 
+        self.save_models('weights')
         train_losses = np.array(train_losses)
         # self.save_model(f"{self.part_name}.model")
         self.plot_losses(train_losses)
@@ -132,9 +129,9 @@ class Solver(object):
 
     def sample(self, n, filename):
         self.g.eval()
-        z = torch.normal(torch.zeros(n, 192), torch.ones(n, 192)).to(device)
-        samples = self.g(z).reshape(-1, 1, 28, 28)
-        samples = (samples + 1) * 0.5
+        z = torch.normal(torch.zeros(n, self.latent_dim), torch.ones(n, self.latent_dim)).to(device)
+        # z = torch.rand(n, self.latent_dim).to(device) * 2 - 1
+        samples = self.g(z).reshape(-1, 1, 28, 28) * 0.5 + 1
         save_image(samples, filename, nrow=10, normalize=True)
 
     def plot_losses(self, train_losses):
@@ -158,8 +155,9 @@ class Solver(object):
         self.e.load_state_dict(torch.load("e_" + filename))
 
 
+
 if __name__ == "__main__":
-    solver = Solver(n_epochs=100, batch_size=128, train_data_amount=1)
+    solver = Solver(n_epochs=100, batch_size=128, train_data_amount=1, latent_dim=192)
     solver.build("bigan")
     solver.train()
     IPython.embed()
