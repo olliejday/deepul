@@ -200,35 +200,53 @@ class Generator1(nn.Module):
         # return torch.tanh(self.fc4(x)).reshape(x.shape[0], 1, 28, 28) # tanh
 
 class Discriminator1(nn.Module):
-    def __init__(self, d_input_dim):
+    def __init__(self, z_dim, x_dim):
         super(Discriminator1, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(d_input_dim, 1024),
+        # self.fc = nn.Sequential(
+        #     nn.Linear(z_dim + x_dim, 1024),
+        #     nn.Dropout(0.5),
+        #     nn.LeakyReLU(0.2),
+        #     nn.Linear(1024, 1024),
+        #     nn.BatchNorm1d(1024, affine=False),
+        #     nn.Dropout(0.5),
+        #     nn.LeakyReLU(0.2),
+        #     nn.Linear(1024, 1),
+        #     nn.Sigmoid()
+        # )
+
+        self.fc_z = nn.Sequential(
+            nn.Linear(z_dim, 5),
+            nn.Dropout(0.5),
+            nn.BatchNorm1d(5, affine=False),
+            nn.Dropout(0.5),
             nn.LeakyReLU(0.2),
-            nn.Linear(1024, 1024),
-            nn.BatchNorm1d(1024, affine=False),
+        )
+
+        self.fc_x = nn.Sequential(
+            nn.Linear(x_dim, 1024),
+            # nn.Dropout(0.5),
             nn.LeakyReLU(0.2),
-            nn.Linear(1024, 1),
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512, affine=False),
+            # nn.Dropout(0.5),
+            nn.LeakyReLU(0.2),
+        )
+
+        self.fc_combined = nn.Sequential(
+            nn.Linear(512 + 5, 64),
+            nn.LeakyReLU(0.2),
+            nn.Linear(64, 1),
             nn.Sigmoid()
         )
-        # self.fc1 = nn.Linear(d_input_dim, 1024)
-        # self.fc2 = nn.Linear(self.fc1.out_features, self.fc1.out_features // 2)
-        # self.fc3 = nn.Linear(self.fc2.out_features, self.fc2.out_features // 2)
-        # self.fc4 = nn.Linear(self.fc3.out_features, 1)
 
     # forward method
     def forward(self, z, x):
-        # x = x.view(x.shape[0], -1)
+        # x = torch.cat((z, x), dim=1)
         # return self.fc(x)
-        x = torch.cat((z, x), dim=1)
-        # x = F.leaky_relu(self.fc1(x), 0.2)
-        # x = F.dropout(x, 0.5)
-        # x = F.leaky_relu(self.fc2(x), 0.2)
-        # x = F.dropout(x, 0.5)
-        # x = F.leaky_relu(self.fc3(x), 0.2)
-        # x = F.dropout(x, 0.5)
-        # return torch.sigmoid(self.fc4(x))
-        return self.fc(x)
+        h_z = self.fc_z(z)
+        h_x = self.fc_x(x.view(-1, 784))
+        h = torch.cat((h_z, h_x), dim=1)
+        return self.fc_combined(h)
 
 class Encoder1(nn.Module):
     def __init__(self, input_dim, output_dim):
@@ -240,7 +258,7 @@ class Encoder1(nn.Module):
             nn.BatchNorm1d(1024, affine=False),
             nn.LeakyReLU(0.2),
             nn.Linear(1024, output_dim),
-            nn.Tanh()
+            # nn.Tanh()
         )
         # self.fc1 = nn.Linear(input_dim, 1024)
         # self.fc2 = nn.Linear(self.fc1.out_features, self.fc1.out_features // 2)
