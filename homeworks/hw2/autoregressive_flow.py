@@ -97,7 +97,7 @@ class MoG(tf.keras.Model):
         self.n_in = n_in
         self.n_out = n_out
         self.components = [MoGMLP(n_in, n_out) for _ in range(self.k)]
-        self.mixture_weights = self.add_weight(name="MixureWeights", shape=(self.k,))
+        self.mixture_weights = self.add_weight(name="MixureWeights", shape=(self.k,), trainable=True)
 
     def get_distributions(self, prev_x, batch_size):
         dstrbns = []
@@ -121,7 +121,7 @@ class MoG(tf.keras.Model):
         weighted_sum, dstrbns, weights = self.setup_df(prev_x, x)
         for i in range(self.k):
             prob = dstrbns[i].prob(x)
-            prob = tf.where(tf.math.is_nan(prob), 0, prob)  # TODO: ok?
+            # prob = tf.where(tf.math.is_nan(prob), 0, prob)  # TODO: ok?
             weighted_sum += weights[i] * prob
         return weighted_sum
 
@@ -169,17 +169,18 @@ class MoG(tf.keras.Model):
 
 class ARFlow:
     # TODO: atm assumes each var only sinlge 1D output
-    def __init__(self, n_vars, k=3):
+    def __init__(self, n_vars, k=3, learning_rate=10e-4):
         self.n_vars = n_vars
         # mixture per variable
         self.mixtures = [MoG(i, 1, k) for i in range(self.n_vars)]
+        self.optimiser = tf.optimizers.Adam(learning_rate=learning_rate)
 
-    def log_p_x(self, inputs):
+    def log_p_x(self, x):
         """
         The log(p(f_{\theta}(x))) term is uniform
         The log(det(d f(x) / d x)) term is the sum of the pdfs
         """
-        logpx = 0
+        logpx = tf.zeros((len(x),))
         for i in range(self.n_vars - 1):
             logpx += self.mixtures[i].pdf(x[:, i], x[:, :i])
         return logpx
@@ -213,14 +214,15 @@ class ARFlow:
     def train(self, X):
         with tf.GradientTape() as tape:
             loss = self.loss(X)
-        tape.gradient(loss, self.get_trainable_weights())
+        grads = tape.gradient(loss, self.get_trainable_weights())
+        self.optimiser.apply_gradients(zip(grads, self.get_trainable_weights()))
         return loss
 
     def loss(self, X):
         return tf.reduce_mean(self.log_p_x(X))
 
     def get_trainable_weights(self):
-        return [mix.trainable_weights for mix in self.mixtures]
+        return [w for mix in self.mixtures for w in mix.trainable_weights]
 
 
 def sample_data():
@@ -243,18 +245,13 @@ if __name__ == "__main__":
     # plt.show()
 
     # TODO: seed
-
-    # mog = MoG(0, 1, 5)
-    # print(mog.pdf(x[:, 0], x[:, :0]))
-    # print(mog.cdf(x[:, 0], x[:, :0]))
-    # print(mog.sample(3, 0.1, x[:3, :0]))
-    # mog = MoG(1, 1, 5)
-    # print(mog.pdf(x[:, 1], x[:, :1]))
-    # print(mog.cdf(x[:, 1], x[:, :1]))
-    # print(mog.sample(3, 0.1, x[:3, :1]))
-
-    flow = ARFlow(2)
-    print(flow.f(x))
-    print(flow.log_p_x(x))
-    print(flow.train(x))
-    print(flow.sample(2))
+    model = ARFlow(2)
+    bs = 128
+    x_dataset = tf.data.Dataset.from_tensor_slices(tf.cast(x, tf.float32))
+    x_iter = x_dataset.shuffle(bs * 2).batch(bs)
+    for batch in x_iter:
+        loss = model.train(batch)
+        print(loss)
+    samples = model.sample(10000)
+    plt.plot(samples[:, 0], samples[:, 1], "x")
+    plt.show()
