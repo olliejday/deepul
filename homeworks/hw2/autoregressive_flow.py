@@ -31,14 +31,14 @@ class ARFlow:
 
     def loss(self, x):
         """
-        Returns loss for batch (1,)
+        Returns loss for batch (1,) in nats / dim
         """
         log_p_x = self.log_p_x(x)
-        return tf.reduce_mean(log_p_x)
+        return - tf.reduce_mean(log_p_x) / self.n_vars
 
     def log_p_x(self, x):
         """
-        Returns log prob of given xs (bs, 1)
+        Returns log prob of given xs (bs, n_vars)
         """
         x = tf.cast(x, tf.float32)
         # zi are uniform -> p(zi) /propto 1 -> log p (zi) = 0
@@ -142,7 +142,7 @@ class ARFlowComponent(tf.keras.layers.Layer):
         x = tf.reshape(x, (len(x), 1))  # expand dims
         weight, dist = self.get_distributions(cond_x)
         # TODO: set clip prob if nan?
-        pdf = tf.reduce_sum(weight * dist.prob(x), axis=1)
+        pdf = tf.reduce_sum(weight * dist.log_prob(x), axis=1)
         return pdf
 
 
