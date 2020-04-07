@@ -38,13 +38,15 @@ class ARFlow:
 
     def log_p_x(self, x):
         """
-        Returns log prob of given xs (bs, n_vars)
+        Returns log prob of given xs (bs, 1)
         """
         x = tf.cast(x, tf.float32)
         # zi are uniform -> p(zi) /propto 1 -> log p (zi) = 0
         # since f(x) are cdf, derivative of f wrt x is pdf
         log_det_jac = self.model.log_pdf(x)
-        return log_det_jac
+        # sum the log probs to get joint log prob
+        # log p(x1, x2) = log p(x1) + log p(x2|x1)
+        return tf.reduce_sum(log_det_jac, axis=-1)
 
     def f_x(self, x):
         """
@@ -216,11 +218,11 @@ def sample_data():
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    # x, y = sample_data()
+    x, y = sample_data()
     # plt.plot(x[:, 0], x[:, 1], "x")
     # plt.show()
 
     model = ARFlow(2)
-    x = np.ones((10, 2))
-    print(model.log_p_x(x))
-    print(model.f_x(x))
+    bs = 128
+    for batch in np.array_split(x, int(len(x) / bs)):
+        print(model.train(x))
