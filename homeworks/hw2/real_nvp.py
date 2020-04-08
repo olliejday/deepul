@@ -55,10 +55,43 @@ class RealNVPModel(tf.keras.Model):
     Model for RealNVP flow
     For 2 variables using MLPs (FF-NN)
     """
-    def __init__(self, n_units=128, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.n_vars = 2  # 2 variable case
+        self.setup()
+
+    def setup(self):
+        self.affine_transf1 = AffineTransformation(True)
+        self.affine_transf2 = AffineTransformation(False)
+        # for z prior standard normal
+        self.z_prior = tfp.distributions.Normal(tf.zeros(self.n_vars), tf.ones(self.n_vars))
+
+    def f_x(self, x):
+        # compose flows
+        return self.affine_transf2.f_x(self.affine_transf1.f_x(x))
+
+    def log_p_x(self, x):
+        # z prior prob
+        log_p_z = self.z_prior.log_prob(self.f_x(x))
+        # sum log det jacs
+        log_det_jac = self.affine_transf1.log_det_jac(x) + self.affine_transf2.log_det_jac(x)
+        # sum over vars
+        return tf.reduce_sum(log_p_z + log_det_jac, -1)
+
+
+class AffineTransformation(tf.keras.layers.Layer):
+    """
+    Affine transformation for RealNVP
+    For 2 variables using MLPs (FF-NN)
+    """
+    def __init__(self, sequential_cond, n_units=128, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
+        """
+        :param n_units: number dense units in MLP
+        :param reverse: if True then x2 | x1 else  x1 | x2 for conditioning
+        """
         super().__init__(trainable, name, dtype, dynamic, **kwargs)
         self.n_units = n_units
-        self.n_vars = 2  # 2 variable case
+        self.sequential_cond = sequential_cond
         self.setup()
 
     def setup(self):
@@ -66,13 +99,10 @@ class RealNVPModel(tf.keras.Model):
         Build with no input shape
         """
         # build params
-        # TODO: should these be NNs or ??
         self.g_theta_scale = DenseNN(self.n_units, 1, activation="tanh")  # TODO: relu?
         self.g_theta_shift = DenseNN(self.n_units, 1, activation="tanh")
         self.scale = self.add_weight("scale", shape=(1,))
         self.scale_shift = self.add_weight("scale_shift", shape=(1,))
-        # for z prior standard normal
-        self.z_prior = tfp.distributions.Normal(tf.zeros(self.n_vars), tf.ones(self.n_vars))
 
     def f_x(self, inputs):
         """
@@ -80,29 +110,35 @@ class RealNVPModel(tf.keras.Model):
         :param inputs: (bs, 2) Xs inputs
         :return: (bs, 2) Zs output
         """
-        x1, x2 = tf.split(inputs, 2, -1)
-        z1 = x1
-        log_scale = self.scale * tf.tanh(self.g_theta_scale(x1)) + self.scale_shift
-        z2 = tf.exp(log_scale) * x2 + self.g_theta_shift(x1)
+        x_cond, x = self.split_vars(inputs)
+        z1 = x_cond
+        log_scale = self.scale * tf.tanh(self.g_theta_scale(x_cond)) + self.scale_shift
+        z2 = tf.exp(log_scale) * x + self.g_theta_shift(x_cond)
         return tf.concat([z1, z2], -1)
 
-    def log_p_x(self, inputs):
+    def split_vars(self, inputs):
+        # order variables sequentially or not? This functions uses x | x_cond
+        if self.sequential_cond:
+            x_cond, x = tf.split(inputs, 2, -1)
+        else:
+            x, x_cond = tf.split(inputs, 2, -1)
+        return x_cond, x
+
+    def log_det_jac(self, inputs):
         """
-        computes log p(x) =   log p(f(x)) + log(det( df(x) / dx))
+        computes log(det( df(x) / dx))
         :param inputs: (bs, n_vars) Xs inputs
-        :return: (bs,) joint probs output
+        :return: (bs,)
         """
-        # z prior prob
-        log_p_z = self.z_prior.log_prob(self.f_x(inputs))
-
-        x1, x2 = tf.split(inputs, 2, -1)
-        log_scale = self.scale * tf.tanh(self.g_theta_scale(x1)) + self.scale_shift
+        x_cond, x = self.split_vars(inputs)
         # since jac is triangular, det of jac is prod of diag
-        # but in this 2 variable case the first diagonal is 1
-        df_dx = tf.exp(log_scale)
-        log_det_jac = tf.math.log(df_dx)
-        return tf.reduce_sum(log_p_z + log_det_jac, -1)
+        # but in this 2 variable case the first diagonal (dz1 / dx1) is 1
+        # 2nd diag (dz2 / dx2) is tf.exp(log_scale) (see above in f_x)
+        # so log this gives log_scale as log det jac
+        return self.scale * tf.tanh(self.g_theta_scale(x_cond)) + self.scale_shift
 
+# TODO: try another affine trasnf ontop with other variable ordering
+#   compose ie. f2(f1(x)) then add for log det jac sum over k det(dfk/fk-1)
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
