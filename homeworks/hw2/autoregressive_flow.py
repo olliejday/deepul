@@ -130,6 +130,7 @@ class ARFlowComponent(tf.keras.layers.Layer):
         """
         x = tf.reshape(x, (len(x), 1))  # expand dims
         weight, dist = self.get_distributions(cond_x)
+        # sum over mixture components
         cdf = tf.reduce_sum(weight * dist.cdf(x), axis=1)
         return cdf
 
@@ -141,16 +142,38 @@ class ARFlowComponent(tf.keras.layers.Layer):
         """
         x = tf.reshape(x, (len(x), 1))  # expand dims
         weight, dist = self.get_distributions(cond_x)
-        # TODO: set clip prob if nan?
-        pdf = tf.reduce_sum(weight * dist.log_prob(x), axis=1)
-        return pdf
+        # TODO: clip prob if nan? ensure != 0 for log
+        # sum over mixture components
+        pdf = tf.reduce_sum(weight * dist.prob(x), axis=1)
+        log_pdf = tf.math.log(pdf)
+        return log_pdf
+
+
+class DenseNN(tf.keras.layers.Layer):
+    def __init__(self, n_units, n_out, activation=None, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
+        super().__init__(trainable, name, dtype, dynamic, **kwargs)
+        self.n_units = n_units
+        self.n_out = n_out
+        self._activation = activation
+
+    def build(self, input_shape):
+        self.layers_list = []
+        self.layers_list.append(tf.keras.layers.Dense(self.n_units, activation=self._activation))
+        self.layers_list.append(tf.keras.layers.Dense(self.n_units, activation=self._activation))
+        self.layers_list.append(tf.keras.layers.Dense(self.n_out))
+
+    def call(self, inputs, **kwargs):
+        x = inputs
+        for layer in self.layers_list:
+            x = layer(x)
+        return x
 
 
 class ARFlowConditionedParamsModel(tf.keras.layers.Layer):
     """
     Dense NN that computes the params for the mixture of gaussians given the conditioned variables as input
     """
-    def __init__(self, k, n_units=64, **kwargs):
+    def __init__(self, k, n_units=128, **kwargs):
         """
         :param k: # gaussians in mixture
         """
@@ -159,20 +182,15 @@ class ARFlowConditionedParamsModel(tf.keras.layers.Layer):
         self.n_units = n_units
 
     def build(self, input_shape):
-        self.layers_list = []
-        self.layers_list.append(tf.keras.layers.Dense(input_shape[1]))
-        self.layers_list.append(tf.keras.layers.Dense(self.n_units))
-        # outputs weight, mean and stddev f.e. gaussian in mixture
-        self.layers_list.append(tf.keras.layers.Dense(self.k * 3))
+        # weight, mean, stddev for each k component
+        self.dense_nn = DenseNN(self.n_units, self.k * 3, activation="tanh")
 
     def call(self, inputs, **kwargs):
         """
         Returns a tuple of the params (weights logits, means, log stddevs) for each input
         ((bs, k), (bs, k), (bs, k))
         """
-        x = inputs
-        for layer in self.layers_list:
-            x = layer(x)
+        x = self.dense_nn(inputs)
         return tf.split(x, 3, axis=1)
 
 
