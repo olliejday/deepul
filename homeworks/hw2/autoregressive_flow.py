@@ -243,4 +243,4 @@ if __name__ == "__main__":
     model = ARFlow(2)
     bs = 128
     for batch in np.array_split(x, int(len(x) / bs)):
-        print(model.train(x))
+        print(model.train(batch))
