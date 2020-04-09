@@ -54,27 +54,32 @@ class RealNVPModel(tf.keras.Model):
     """
     Model for RealNVP flow
     For 2 variables using MLPs (FF-NN)
+    n_affine_transfs = number of affine transformations in model, alternates order of conditioning
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, n_affine_transfs=5, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.n_vars = 2  # 2 variable case
+        self.n_affine_transfs = n_affine_transfs
         self.setup()
 
     def setup(self):
-        self.affine_transf1 = AffineTransformation(True)
-        self.affine_transf2 = AffineTransformation(False)
+        # setup affine transformations, alternate orders (sequential or reversed) of conditioning
+        self.affine_transfs = [AffineTransformation(i % 2 == 0) for i in range(self.n_affine_transfs)]
         # for z prior standard normal
         self.z_prior = tfp.distributions.Normal(tf.zeros(self.n_vars), tf.ones(self.n_vars))
 
     def f_x(self, x):
         # compose flows
-        return self.affine_transf2.f_x(self.affine_transf1.f_x(x))
+        for aff_transf in self.affine_transfs:
+            x = aff_transf.f_x(x)
+        return x
 
     def log_p_x(self, x):
         # z prior prob
         log_p_z = self.z_prior.log_prob(self.f_x(x))
         # sum log det jacs
-        log_det_jac = self.affine_transf1.log_det_jac(x) + self.affine_transf2.log_det_jac(x)
+        transfs_list = [aff_transf.log_det_jac(x) for aff_transf in self.affine_transfs]
+        log_det_jac = tf.reduce_sum(transfs_list, 0)
         # sum over vars
         return tf.reduce_sum(log_p_z + log_det_jac, -1)
 
@@ -84,14 +89,15 @@ class AffineTransformation(tf.keras.layers.Layer):
     Affine transformation for RealNVP
     For 2 variables using MLPs (FF-NN)
     """
-    def __init__(self, sequential_cond, n_units=128, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
+    def __init__(self, left_cond, n_units=128, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
         """
         :param n_units: number dense units in MLP
-        :param reverse: if True then x2 | x1 else  x1 | x2 for conditioning
+        :param left_cond: if True then left half variables are conditioned on ie. x2 | x1
+        else reversed to right conditioned on x1 | x2 for conditioning
         """
         super().__init__(trainable, name, dtype, dynamic, **kwargs)
         self.n_units = n_units
-        self.sequential_cond = sequential_cond
+        self.left_cond = left_cond
         self.setup()
 
     def setup(self):
@@ -99,8 +105,7 @@ class AffineTransformation(tf.keras.layers.Layer):
         Build with no input shape
         """
         # build params
-        self.g_theta_scale = DenseNN(self.n_units, 1, activation="tanh")  # TODO: relu?
-        self.g_theta_shift = DenseNN(self.n_units, 1, activation="tanh")
+        self.g_theta = DenseNN(self.n_units, 2, activation="relu")  # TODO: tanh?
         self.scale = self.add_weight("scale", shape=(1,))
         self.scale_shift = self.add_weight("scale_shift", shape=(1,))
 
@@ -110,19 +115,40 @@ class AffineTransformation(tf.keras.layers.Layer):
         :param inputs: (bs, 2) Xs inputs
         :return: (bs, 2) Zs output
         """
-        x_cond, x = self.split_vars(inputs)
-        z1 = x_cond
-        log_scale = self.scale * tf.tanh(self.g_theta_scale(x_cond)) + self.scale_shift
-        z2 = tf.exp(log_scale) * x + self.g_theta_shift(x_cond)
-        return tf.concat([z1, z2], -1)
+        x1, x2 = self.split_vars(inputs)
+        z1 = x1
+        # MLP outputs on conditioned vars
+        log_scale, g_theta_shift = self.log_scale(x1)
+        z2 = tf.exp(log_scale) * x2 + g_theta_shift
+        # TODO: should this be different if order of vars is different?
+        if self.left_cond:
+            return tf.concat([z1, z2], -1)
+        else:
+            return tf.concat([z2, z1], -1)
+
+    def log_scale(self, x1):
+        """
+        Retunrs log scale term and g_theta, shift term output from MLP
+        :param x1: (bs, n_vars-1) conditoned vars input
+        :return: (bs,), (bs,)
+        """
+        g_theta_scale, g_theta_shift = tf.split(self.g_theta(x1), 2, -1)
+        log_scale = self.scale * tf.tanh(g_theta_scale) + self.scale_shift
+        return log_scale, g_theta_shift
 
     def split_vars(self, inputs):
-        # order variables sequentially or not? This functions uses x | x_cond
-        if self.sequential_cond:
-            x_cond, x = tf.split(inputs, 2, -1)
+        """
+        Splits inputs into current and conditioned variables based on order of conditioning
+        Note x1 and x2 are just the order of conditioning: x2 | x1, not necessarily variable order or labels in data
+        :param inputs: (bs, n_vars)
+        :return: (bs, n), (bs, m) where n+m=n_vars
+        """
+        # order variables sequentially or not?
+        if self.left_cond:
+            x1, x2 = tf.split(inputs, 2, -1)
         else:
-            x, x_cond = tf.split(inputs, 2, -1)
-        return x_cond, x
+            x2, x1 = tf.split(inputs, 2, -1)
+        return x1, x2
 
     def log_det_jac(self, inputs):
         """
@@ -130,15 +156,18 @@ class AffineTransformation(tf.keras.layers.Layer):
         :param inputs: (bs, n_vars) Xs inputs
         :return: (bs,)
         """
-        x_cond, x = self.split_vars(inputs)
+        x1, _ = self.split_vars(inputs)
         # since jac is triangular, det of jac is prod of diag
         # but in this 2 variable case the first diagonal (dz1 / dx1) is 1
         # 2nd diag (dz2 / dx2) is tf.exp(log_scale) (see above in f_x)
         # so log this gives log_scale as log det jac
-        return self.scale * tf.tanh(self.g_theta_scale(x_cond)) + self.scale_shift
+        log_scale, _ = self.log_scale(x1)
+        # TODO: should this be different if order of vars is different?
+        if self.left_cond:
+            return tf.concat([tf.zeros((len(inputs), 1)), log_scale], -1)
+        else:
+            return tf.concat([log_scale, tf.zeros((len(inputs), 1))], -1)
 
-# TODO: try another affine trasnf ontop with other variable ordering
-#   compose ie. f2(f1(x)) then add for log det jac sum over k det(dfk/fk-1)
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
