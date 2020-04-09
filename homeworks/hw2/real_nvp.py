@@ -78,10 +78,13 @@ class RealNVPModel(tf.keras.Model):
         # z prior prob
         log_p_z = self.z_prior.log_prob(self.f_x(x))
         # sum log det jacs
-        transfs_list = [aff_transf.log_det_jac(x) for aff_transf in self.affine_transfs]
+        transfs_list = []
+        for aff_transf in self.affine_transfs:
+            x = aff_transf.log_det_jac(x)
+            transfs_list.append(x)
         log_det_jac = tf.reduce_sum(transfs_list, 0)
         # sum over vars
-        return tf.reduce_sum(log_p_z + log_det_jac, -1)
+        return tf.reduce_sum(log_p_z, -1) + tf.reduce_sum(log_det_jac, -1)
 
 
 class AffineTransformation(tf.keras.layers.Layer):
@@ -144,6 +147,7 @@ class AffineTransformation(tf.keras.layers.Layer):
         :return: (bs, n), (bs, m) where n+m=n_vars
         """
         # order variables sequentially or not?
+        # TODO: input ordering?
         if self.left_cond:
             x1, x2 = tf.split(inputs, 2, -1)
         else:
