@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 
 
-class DenseNN(tf.keras.layers.Layer):
+class MLP(tf.keras.layers.Layer):
     def __init__(self, n_units, n_out, activation=None, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
         super().__init__(trainable, name, dtype, dynamic, **kwargs)
         self.n_units = n_units

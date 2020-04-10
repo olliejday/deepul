@@ -2,7 +2,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 import numpy as np
 
-from common import DenseNN
+from common import MLP
 
 class ARFlow:
     """
@@ -164,7 +164,7 @@ class ARFlowConditionedParamsModel(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # weight, mean, stddev for each k component
-        self.dense_nn = DenseNN(self.n_units, self.k * 3, activation="tanh")
+        self.dense_nn = MLP(self.n_units, self.k * 3, activation="tanh")
 
     def call(self, inputs, **kwargs):
         """
