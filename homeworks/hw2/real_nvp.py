@@ -2,7 +2,8 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 import numpy as np
 
-from autoregressive_flow import sample_data, DenseNN
+from autoregressive_flow import sample_data
+from common import DenseNN
 
 
 class RealNVP:
@@ -68,20 +69,31 @@ class RealNVPModel(tf.keras.Model):
         # for z prior standard normal
         self.z_prior = tfp.distributions.Normal(tf.zeros(self.n_vars), tf.ones(self.n_vars))
 
-    def f_x(self, x):
-        # compose flows
+    def forward(self, x):
+        z = x
+        log_det_jac = tf.zeros_like(x)
+        # compose flows and sum log_det_jac
         for aff_transf in self.affine_transfs:
-            x = aff_transf.f_x(x)
-        return x
+            z, log_scale = aff_transf.forward(z)
+            log_det_jac += log_scale
+        return z, log_det_jac
+
+    def f_x(self, x):
+        z, _ = self.forward(z)
+        return z
 
     def log_p_x(self, x):
+        z, log_det_jac1 = self.forward(x)
+
         # z prior prob
-        log_p_z = self.z_prior.log_prob(self.f_x(x))
-        # sum log det jacs
+        log_p_z = self.z_prior.log_prob(z)
+        # log det jac sum
         log_det_jac = tf.zeros_like(x)
+        # compose flows and sum log_det_jac
         for aff_transf in self.affine_transfs:
-            x = aff_transf.log_det_jac(x)
-            log_det_jac += x
+            log_scale = aff_transf.forward(z)
+            log_det_jac += log_scale
+        print(log_det_jac1[0], log_det_jac[0])
         # sum over vars
         return tf.reduce_sum(log_p_z, -1) + tf.reduce_sum(log_det_jac, -1)
 
@@ -115,7 +127,7 @@ class AffineTransformation(tf.keras.layers.Layer):
         else:
             self.mask = np.array([0.0, 1.0])
 
-    def f_x(self, inputs):
+    def forward(self, inputs):
         """
         computes z = f(x)
         :param inputs: (bs, 2) Xs inputs
@@ -131,7 +143,7 @@ class AffineTransformation(tf.keras.layers.Layer):
         #     return tf.concat([z1, z2], -1)
         # else:
         #     return tf.concat([z2, z1], -1)
-        return z
+        return z, log_scale
 
     def log_scale(self, x):
         """
@@ -165,6 +177,7 @@ class AffineTransformation(tf.keras.layers.Layer):
         :param inputs: (bs, n_vars) Xs inputs
         :return: (bs,)
         """
+        # TODO: if delete, copy this comment out
         # x1, _ = self.split_vars(inputs)
         # since jac is triangular, det of jac is prod of diag
         # but in this 2 variable case the first diagonal (dz1 / dx1) is 1
@@ -178,11 +191,9 @@ class AffineTransformation(tf.keras.layers.Layer):
         #     return tf.concat([log_scale, tf.zeros((len(inputs), 1))], -1)
         return log_scale
 
-# TODO: why get -ve loss? log_det_jac term is +ve -> -ve NLL
-#   do we get it with 1 affine transf or is it in the composition?
-#   is this a problem? real vars so could be pdf > 1?
-#   * Seems to be able to assign too much prob mass on densities plot, how is it supposed to be more constrained?
-# TODO: o/w could just be a training thing
+
+# TODO cleanup
+#   issue was updating x with output of log_det_jac when it should be output of f_x in the loop in model.log_det_jac
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt

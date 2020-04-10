@@ -2,6 +2,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 import numpy as np
 
+from common import DenseNN
 
 class ARFlow:
     """
@@ -147,26 +148,6 @@ class ARFlowComponent(tf.keras.layers.Layer):
         pdf = tf.reduce_sum(weight * dist.prob(x), axis=1)
         log_pdf = tf.math.log(pdf)
         return log_pdf
-
-
-class DenseNN(tf.keras.layers.Layer):
-    def __init__(self, n_units, n_out, activation=None, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
-        super().__init__(trainable, name, dtype, dynamic, **kwargs)
-        self.n_units = n_units
-        self.n_out = n_out
-        self._activation = activation
-
-    def build(self, input_shape):
-        self.layers_list = []
-        self.layers_list.append(tf.keras.layers.Dense(self.n_units, activation=self._activation))
-        self.layers_list.append(tf.keras.layers.Dense(self.n_units, activation=self._activation))
-        self.layers_list.append(tf.keras.layers.Dense(self.n_out))
-
-    def call(self, inputs, **kwargs):
-        x = inputs
-        for layer in self.layers_list:
-            x = layer(x)
-        return x
 
 
 class ARFlowConditionedParamsModel(tf.keras.layers.Layer):
