@@ -62,72 +62,71 @@ import numpy as np
 #         x = tf.cast(x, tf.float32)
 #         # f is cdf
 #         return self.model.cdf(x)
-#
-#
-# class PixelCNNARFlowModel(tf.keras.layers.Layer):
-#     """
-#     PixelCNN outputs a mixture of Gaussians for each (B&W, real valued) pixel for an autoregressive flow
-#     """
-#     def __init__(self, H, W, k, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
-#         """
-#         :param H, W: height and width of image, assumed single, real-valued channel
-#         :param k: # gaussians in mixture
-#         """
-#         super().__init__(trainable, name, dtype, dynamic, **kwargs)
-#         self.H, self.W = H, W
-#         self.k = k
-#         self.model = self.setup_model()  # model outputs MoG distrbn params
-#
-#     def setup_model(self):
-#         """
-#         Model takes (bs,image shape) inputs and outputs (bs, image shape * 3) params for mixture
-#         """
-#         return PixelCNNModel(self.H, self.W, self.C)
-#
-#     def get_distributions(self, x):
-#         """
-#         :param x: (bs, n_cond)
-#         :return: weights, dist
-#         weights is a tensor (bs, k)
-#         dist is a batched tfp distribution (batch shape (bs, k))
-#         """
-#         # outputs of model
-#         weights_logits, means, log_stddevs = self.model(x)
-#         stddevs = tf.exp(log_stddevs)
-#         weights = tf.nn.softmax(weights_logits, -1)
-#         return weights, tfp.distributions.Normal(means, stddevs)
-#
-#     def f_x(self, x):
-#         """
-#         z = f(x)
-#         Here this is the cdf of mixture model
-#         :param x: (bs, 1) current var's value
-#         :param cond_x: (bs, n_cond) conditioned vars' values
-#         :return: (bs,)
-#         """
-#         x = tf.reshape(x, (len(x), 1))  # expand dims
-#         cond_x = None
-#         weight, dist = self.get_distributions(cond_x)
-#         # sum over mixture components
-#         cdf = tf.reduce_sum(weight * dist.cdf(x), axis=1)
-#         return cdf
-#
-#     def log_p_x(self, x):
-#         """
-#         log p(x) = log p(f(x)) + log (det(df/dx))
-#         here the log det term is the pdf of mixture model
-#         :param x: (bs, 1) current var's value
-#         :param cond_x: (bs, n_cond) conditioned vars' values
-#         :return: (bs,)
-#         """
-#         x = tf.reshape(x, (len(x), 1))  # expand dims
-#         cond_x = None
-#         weight, dist = self.get_distributions(cond_x)
-#         # TODO: clip prob if nan? ensure != 0 for log
-#         # sum over mixture components
-#         pdf = tf.reduce_sum(weight * dist.prob(x), axis=1)
-#         log_pdf = tf.math.log(pdf)
-#         return log_pdf
+
+
+class PixelCNNARFlowModel(tf.keras.layers.Layer):
+    """
+    PixelCNN outputs a mixture of Gaussians for each (B&W, real valued) pixel for an autoregressive flow
+    """
+    def __init__(self, H, W, k, factorised, n_filters, n_res, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
+        """
+        :param H, W: height and width of image, assumed single, real-valued channel
+        :param k: # gaussians in mixture
+        """
+        super().__init__(trainable, name, dtype, dynamic, **kwargs)
+        self.H, self.W = H, W
+        self.k = k
+        self.factorised = factorised  # TODO which?
+        self.n_filters = n_filters
+        self.n_res = n_res
+        self.model = self.setup_model()  # model outputs MoG distrbn params
+
+    def setup_model(self):
+        """
+        Model takes (bs,image shape) inputs and outputs (bs, image shape * 3) params for mixture
+        """
+        return PixelCNNModel(self.H, self.W, self.C, self.factorised, self.n_filters, self.n_res, n_outputs=3)
+
+    def get_distributions(self, x):
+        """
+        :param x: (bs, n_cond)
+        :return: weights, dist
+        weights is a tensor (bs, k)
+        dist is a batched tfp distribution (batch shape (bs, k))
+        """
+        # outputs of model (bs, H, W, C * 3)
+        outputs = self.model(x)
+        # each param of shape (bs, H, W, C)
+        weights_logits, means, log_stddevs = tf.split(outputs, 3, -1)
+        stddevs = tf.exp(log_stddevs)
+        weights = tf.nn.softmax(weights_logits, -1)
+        return weights, tfp.distributions.Normal(means, stddevs)
+
+    def f_x(self, x):
+        """
+        z = f(x)
+        Here this is the cdf of mixture model
+        :param x: (bs, H, W, C) batch image inputs
+        :return: (bs,)
+        """
+        weight, dist = self.get_distributions(x)
+        # sum over mixture components
+        cdf = tf.reduce_sum(weight * dist.cdf(x), axis=1)
+        return cdf
+
+    def log_p_x(self, x):
+        """
+        log p(x) = log p(f(x)) + log (det(df/dx))
+        here the log det term is the pdf of mixture model
+        :param x: (bs, H, W, C) batch image inputs
+        :return: (bs,)
+        """
+        weight, dist = self.get_distributions(x)
+        # sum over mixture components
+        pdf = tf.reduce_sum(weight * dist.prob(x), axis=1)
+        # clip for numerical stability
+        log_pdf = tf.math.log(tf.maximum(pdf, 1e-9))
+        return log_pdf
 
 
 """
@@ -242,12 +241,12 @@ class PixelCNNModel(tf.keras.Model):
     Outputs params for AR flow mixture model.
      Models real-valued pixels(N, h*w, c)
     """
-    def __init__(self, H, W, C, n_outputs, factorised, n_filters, n_res, *args, **kwargs):
+    def __init__(self, H, W, C, factorised, n_filters, n_res, n_outputs=3, *args, **kwargs):
         """
         :param H, W, C: height, width and number of channels
         :param n_outputs: number of outputs for each pixel (usually 3 for mixture of Gaussians)
         :param factorised: whether to have factorised over channels - affects masks
-        :param n_filters: number of fitlers each hidden conv layer
+        :param n_filters: number of filters each hidden conv layer
         :param n_res: number of residual blocks
         """
         super().__init__(*args, **kwargs)

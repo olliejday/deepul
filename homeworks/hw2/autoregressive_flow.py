@@ -4,6 +4,7 @@ import numpy as np
 
 from common import MLP
 
+
 class ARFlow:
     """
     Wraps the model with function handles and training code
@@ -56,6 +57,7 @@ class ARFlow:
         x = tf.cast(x, tf.float32)
         # f is cdf
         return self.model.cdf(x)
+
 
 class ARFlowModel(tf.keras.Model):
     """
@@ -114,8 +116,8 @@ class ARFlowComponent(tf.keras.layers.Layer):
         """
         :param x: (bs, n_cond)
         :return: weights, dist
-        weights is a tensor (bs, k)
-        dist is a batched tfp distribution (batch shape (bs, k))
+        weights is a tensor (bs, k) of weights for mixutre distribution
+        dist is a batched set of tfp distributions for the mixture (batch shape (bs, k))
         """
         # outputs of model
         weights_logits, means, log_stddevs = self.model(x)
@@ -143,10 +145,10 @@ class ARFlowComponent(tf.keras.layers.Layer):
         """
         x = tf.reshape(x, (len(x), 1))  # expand dims
         weight, dist = self.get_distributions(cond_x)
-        # TODO: clip prob if nan? ensure != 0 for log
         # sum over mixture components
         pdf = tf.reduce_sum(weight * dist.prob(x), axis=1)
-        log_pdf = tf.math.log(pdf)
+        # clip for numerical stability
+        log_pdf = tf.math.log(tf.maximum(pdf, 1e-9))
         return log_pdf
 
 
