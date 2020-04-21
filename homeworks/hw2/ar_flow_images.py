@@ -1,133 +1,137 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
 import numpy as np
+from autoregressive_flow import ARFlow
 
+# TODO: loss to NaN
 # TODO: dequantize the data and scale
 
-# class PixelCNNARFlow:
-#     """
-#     Wraps the model with function handles and training code
-#     PixelCNN outputs with an autoregressive flow of mixture of Gaussians
-#     """
-#     def __init__(self, H, W, k, lr=10e-3):
-#         """
-#
-#         :param H, W: height and width of image, assumed single, real-valued channel
-#         :param k: # gaussians in mixture
-#         :param lr: learning rate
-#         """
-#         self.H, self.W = H, W
-#         self.k = k
-#         self.optimiser = tf.optimizers.Adam(learning_rate=lr)
-#         self.model = self.setup_model()
-#
-#     def train(self, x):
-#         """
-#         Run training step
-#         Returns loss for batch (1,)
-#         """
-#         with tf.GradientTape() as tape:
-#             loss = self.loss(x)
-#         grads = tape.gradient(loss, self.model.trainable_variables)
-#         self.optimiser.apply_gradients(zip(grads, self.model.trainable_variables))
-#         return loss
-#
-#     def setup_model(self):
-#         return PixelCNNARFlowModel(self.H, self.W, self.k)
-#
-#     def loss(self, x):
-#         """
-#         Returns loss for batch (1,) in nats / dim
-#         """
-#         log_p_x = self.log_p_x(x)
-#         n_vars = None  # TODO
-#         return - tf.reduce_mean(log_p_x) / n_vars
-#
-#     def log_p_x(self, x):
-#         """
-#         Returns log prob of given xs (bs, n_vars)
-#         """
-#         x = tf.cast(x, tf.float32)
-#         # zi are uniform -> p(zi) /propto 1 -> log p (zi) = 0
-#         # since f(x) are cdf, derivative of f wrt x is pdf
-#         log_det_jac = self.model.log_p_x(x)
-#         # sum the log probs to get joint log prob
-#         # log p(x1, x2) = log p(x1) + log p(x2|x1)
-#         return tf.reduce_sum(log_det_jac, axis=-1)
-#
-#     def f_x(self, x):
-#         """
-#         Returns z values for given xs (bs, n_vars)
-#         """
-#         x = tf.cast(x, tf.float32)
-#         # f is cdf
-#         return self.model.cdf(x)
 
-
-class PixelCNNARFlowModel(tf.keras.layers.Layer):
+class PixelCNNARFlow(ARFlow):
     """
-    PixelCNN outputs a mixture of Gaussians for each (B&W, real valued) pixel for an autoregressive flow
+    Wraps the model with function handles and training code
+    PixelCNN outputs with an autoregressive flow of mixture of Gaussians
     """
-    def __init__(self, H, W, k, factorised, n_filters, n_res, trainable=True, name=None, dtype=None, dynamic=False, **kwargs):
+    def __init__(self, H, W, C, k, lr=10e-3):
         """
-        :param H, W: height and width of image, assumed single, real-valued channel
+        :param H, W, C: height and width and # channels of image, assumed single, real-valued channel
         :param k: # gaussians in mixture
+        :param lr: learning rate
         """
-        super().__init__(trainable, name, dtype, dynamic, **kwargs)
-        self.H, self.W = H, W
+        self.H, self.W, self.C = H, W, C
+        n_vars = self.H * self.W * self.C  # a var per pixel
         self.k = k
-        self.factorised = factorised  # TODO which?
-        self.n_filters = n_filters
-        self.n_res = n_res
-        self.model = self.setup_model()  # model outputs MoG distrbn params
+        super().__init__(n_vars, lr)
 
     def setup_model(self):
         """
-        Model takes (bs,image shape) inputs and outputs (bs, image shape * 3) params for mixture
+        Overwrite with pixelCNN model
+        :return:
         """
-        return PixelCNNModel(self.H, self.W, self.C, self.factorised, self.n_filters, self.n_res, n_outputs=3)
+        return PixelCNNARFlowModel(self.H, self.W, self.C, self.k)
 
-    def get_distributions(self, x):
+    def sample(self, n, seed=123):
+        """
+        n number of samples
+        seed for PRNG
+        """
+        return self.model.sample(n, seed)
+
+
+class PixelCNNARFlowModel(tf.keras.Model):
+    """
+    PixelCNN outputs a mixture of Gaussians for each (B&W, real valued) pixel for an autoregressive flow
+    """
+    def __init__(self, H, W, C, k, factorised=True, n_filters=64, n_res=7, **kwargs):
+        """
+        :param H, W, C: height and width and # channels of image, assumed single, real-valued channel
+        :param k: # gaussians in mixture
+        :param factorised: whether to have factorised over channels - affects masks (doesn't matter in b&w dataset)
+        :param n_filters: number of filters each hidden conv layer
+        :param n_res: number of residual blocks
+        """
+        super().__init__(**kwargs)
+        self.H, self.W, self.C = H, W, C
+        self.k = k
+        self.factorised = factorised
+        self.n_filters = n_filters
+        self.n_res = n_res
+        self.model = self._setup_model()  # model outputs MoG distrbn params
+
+    def _setup_model(self):
+        """
+        Model takes (bs,image shape) inputs
+        Outputs (bs, image shape * 3 * k) for each param (weight, mean, stddev) for each mixture (k)
+        """
+        return PixelCNNModel(self.H, self.W, self.C, self.factorised, self.n_filters, self.n_res, n_outputs=3*self.k)
+
+    def _get_distribution(self, x):
         """
         :param x: (bs, n_cond)
-        :return: weights, dist
-        weights is a tensor (bs, k)
-        dist is a batched tfp distribution (batch shape (bs, k))
+        :return: weights_dist, dist
+        categorical distribution over components tfp.distributions.Categorical
+        mixture distribution over gaussians with weights distribution tfp.distributions.Mixture
         """
-        # outputs of model (bs, H, W, C * 3)
+        # outputs of model (bs, H, W, C * 3 * k)
         outputs = self.model(x)
-        # each param of shape (bs, H, W, C)
+        # each param of shape (bs, H, W, C * k)
         weights_logits, means, log_stddevs = tf.split(outputs, 3, -1)
         stddevs = tf.exp(log_stddevs)
-        weights = tf.nn.softmax(weights_logits, -1)
-        return weights, tfp.distributions.Normal(means, stddevs)
+        # get the component distributions and a distribution for mixture weights
+        components_dists = [tfp.distributions.Normal(means[:, :, :, :, i], stddevs[:, :, :, :, i]) for i in range(self.k)]
+        weights_dist = tfp.distributions.Categorical(logits=weights_logits)
+        # handles batching
+        return tfp.distributions.Mixture(weights_dist, components_dists)
 
-    def f_x(self, x):
+    def cdf(self, x):
         """
         z = f(x)
         Here this is the cdf of mixture model
         :param x: (bs, H, W, C) batch image inputs
         :return: (bs,)
         """
-        weight, dist = self.get_distributions(x)
-        # sum over mixture components
-        cdf = tf.reduce_sum(weight * dist.cdf(x), axis=1)
-        return cdf
+        dist = self._get_distribution(x)
+        # TODO: check shapes
+        return dist.cdf(x)
 
-    def log_p_x(self, x):
+    def log_pdf(self, x):
         """
-        log p(x) = log p(f(x)) + log (det(df/dx))
+        returns log (det(df/dx))
         here the log det term is the pdf of mixture model
         :param x: (bs, H, W, C) batch image inputs
         :return: (bs,)
         """
-        weight, dist = self.get_distributions(x)
-        # sum over mixture components
-        pdf = tf.reduce_sum(weight * dist.prob(x), axis=1)
         # clip for numerical stability
-        log_pdf = tf.math.log(tf.maximum(pdf, 1e-9))
+        log_pdf = tf.math.log(tf.maximum(self.pdf(x), 1e-9))
         return log_pdf
 
+    def pdf(self, x):
+        dist = self._get_distribution(x)
+        # TODO: check shape
+        return dist.prob(x)
+
+    def sample(self, n, seed=123):
+        """
+        :param n: number of samples
+        :return: (n, H, W, C) samples
+        """
+        # first pixel unconditional
+        images = np.zeros((n, self.H, self.W, self.C))
+        # sample and update iteratively
+        for h in range(self.H):
+            for w in range(self.W):
+                # if factorised over channels then only need one fwd pass
+                if self.factorised:
+                    dist = self._get_distribution(images)
+                    samples = dist.sample(1, seed=seed)[0]
+                    images[:, h, w] = samples[:, h, w]
+                # o/w we need to condition on prev channels
+                else:
+                    for c in range(self.C):
+                        dist = self._get_distribution(images)
+                        samples = dist.sample(1, seed=seed)[0]
+                        images[:, h, w, c] = samples[:, h, w, c]
+        return images
 
 """
 PixelCNN
@@ -244,7 +248,7 @@ class PixelCNNModel(tf.keras.Model):
     def __init__(self, H, W, C, factorised, n_filters, n_res, n_outputs=3, *args, **kwargs):
         """
         :param H, W, C: height, width and number of channels
-        :param n_outputs: number of outputs for each pixel (usually 3 for mixture of Gaussians)
+        :param n_outputs: number of outputs for each pixel (usually 3 * k for mixture of k Gaussians)
         :param factorised: whether to have factorised over channels - affects masks
         :param n_filters: number of filters each hidden conv layer
         :param n_res: number of residual blocks
@@ -270,8 +274,8 @@ class PixelCNNModel(tf.keras.Model):
 
     def call(self, inputs, training=None, mask=None):
         """
-        Returns output of pixelCNN (bs, H, W, C * n_out)
         :param inputs: (bs, H, W, C) images
+        Returns output of pixelCNN (bs, H, W, C, n_out)
         """
         img = tf.cast(inputs, tf.float32)
         x = self.layer1(img)
@@ -281,4 +285,29 @@ class PixelCNNModel(tf.keras.Model):
             x = layer(x)
         for layer in self.output_conv:
             x = layer(x)
+        x = tf.reshape(x, (-1, self.H, self.W, self.C, self.n_outputs))
         return x
+
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    H, W, C = 5, 5, 1
+    k = 5
+    factorised = True
+    model = PixelCNNARFlow(H, W, C, k)
+    bs = 128
+    x = np.stack([np.eye(5)] * bs).reshape((bs, H, W, C)) * 0.98 + 0.01
+    # dequantise
+    x = x - np.maximum(0, np.random.normal(0, 0.01, (bs, H, W, C)))
+    for i in range(1):
+        print(model.train(x))
+    sample = model.sample(3)
+    sample = np.squeeze(sample)
+    # same as handout,
+    # [0,0.5] represents a black pixel
+    # and [0.5,1] represents a white pixel
+    plot_im = np.zeros_like(sample)
+    plot_im[np.where(sample > 0.5)] = 1.
+    plot_im = np.hstack(plot_im)
+    plt.imshow(plot_im, cmap="Greys")
+    plt.show()

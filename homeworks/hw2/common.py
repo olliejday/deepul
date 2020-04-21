@@ -72,7 +72,7 @@ def train_model(model, train_data, test_data, dset_id, n_epochs, bs):
     y, x = np.mgrid[slice(y_lim[0], y_lim[1] + dy, dy),
                     slice(x_lim[0], x_lim[1] + dx, dx)]
     mesh_xs = np.stack([x, y], axis=2).reshape(-1, 2)
-    densities = np.exp(model.log_p_x(mesh_xs).numpy())
+    densities = np.exp(model.log_pdf(mesh_xs).numpy())
     print(np.shape(densities))
 
     # latents
@@ -80,7 +80,7 @@ def train_model(model, train_data, test_data, dset_id, n_epochs, bs):
     train_iter = train_dataset.batch(bs)
     zs = []
     for batch in train_iter:
-        zs.append(model.f_x(batch))
+        zs.append(model.cdf(batch))
     latents = np.concatenate(zs)
 
     return train_losses, test_losses, densities, latents
