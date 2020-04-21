@@ -3,9 +3,7 @@ import tensorflow_probability as tfp
 import numpy as np
 from autoregressive_flow import ARFlow
 
-# TODO: loss to NaN
-# TODO: dequantize the data and scale
-
+# TODO: dequantize the data and scale, account for in loss scaling
 
 class PixelCNNARFlow(ARFlow):
     """
@@ -35,7 +33,7 @@ class PixelCNNARFlow(ARFlow):
         n number of samples
         seed for PRNG
         """
-        return self.model.sample(n, seed)
+        return self.model.samples(n, seed)
 
 
 class PixelCNNARFlowModel(tf.keras.Model):
@@ -296,18 +294,24 @@ if __name__ == "__main__":
     factorised = True
     model = PixelCNNARFlow(H, W, C, k)
     bs = 128
-    x = np.stack([np.eye(5)] * bs).reshape((bs, H, W, C)) * 0.98 + 0.01
+    x = np.stack([np.eye(5)] * bs).reshape((bs, H, W, C))
     # dequantise
-    x = x - np.maximum(0, np.random.normal(0, 0.01, (bs, H, W, C)))
-    for i in range(1):
+    x = x + np.random.random((bs, H, W, C))
+    # scale to [0, 1]
+    x = x / np.max(x)
+    for i in range(25):
         print(model.train(x))
-    sample = model.sample(3)
-    sample = np.squeeze(sample)
+    samples = model.sample(3)
+    samples = np.squeeze(samples)
+    plt.imshow(samples, cmap="gray")
+    plt.title("samples")
+    plt.show()
     # same as handout,
     # [0,0.5] represents a black pixel
     # and [0.5,1] represents a white pixel
-    plot_im = np.zeros_like(sample)
-    plot_im[np.where(sample > 0.5)] = 1.
+    plot_im = np.zeros_like(samples)
+    plot_im[np.where(samples > 0.5)] = 1.
     plot_im = np.hstack(plot_im)
-    plt.imshow(plot_im, cmap="Greys")
+    plt.imshow(plot_im, cmap="gray")
+    plt.title("samples binary")
     plt.show()
