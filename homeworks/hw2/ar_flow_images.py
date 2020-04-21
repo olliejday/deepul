@@ -3,6 +3,8 @@ import tensorflow_probability as tfp
 import numpy as np
 from autoregressive_flow import ARFlow
 
+# TODO: batch norm? bigger model? tanh?
+# TODO: nan loss and neg loss
 # TODO: dequantize the data and scale, account for in loss scaling
 
 class PixelCNNARFlow(ARFlow):
@@ -33,7 +35,7 @@ class PixelCNNARFlow(ARFlow):
         n number of samples
         seed for PRNG
         """
-        return self.model.samples(n, seed)
+        return self.model.sample(n, seed)
 
 
 class PixelCNNARFlowModel(tf.keras.Model):
@@ -299,11 +301,11 @@ if __name__ == "__main__":
     x = x + np.random.random((bs, H, W, C))
     # scale to [0, 1]
     x = x / np.max(x)
-    for i in range(25):
+    for i in range(50):
         print(model.train(x))
     samples = model.sample(3)
     samples = np.squeeze(samples)
-    plt.imshow(samples, cmap="gray")
+    plt.imshow(np.hstack(samples), cmap="gray")
     plt.title("samples")
     plt.show()
     # same as handout,
@@ -313,5 +315,5 @@ if __name__ == "__main__":
     plot_im[np.where(samples > 0.5)] = 1.
     plot_im = np.hstack(plot_im)
     plt.imshow(plot_im, cmap="gray")
-    plt.title("samples binary")
+    plt.title("samples binarised")
     plt.show()
