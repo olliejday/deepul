@@ -3,9 +3,9 @@ import tensorflow_probability as tfp
 import numpy as np
 from autoregressive_flow import ARFlow
 
-# TODO: batch norm?
+# TODO: improve performance -  bug?
 # TODO: nan loss
-# TODO: neg loss?
+# TODO: neg loss
 # TODO: dequantize the data and scale, account for in loss scaling
 
 class PixelCNNARFlow(ARFlow):
@@ -302,7 +302,7 @@ if __name__ == "__main__":
     x = x + np.random.random((bs, H, W, C))
     # scale to [0, 1]
     x = x / np.max(x)
-    for i in range(50):
+    for i in range(20):
         print(model.train(x))
     samples = model.sample(3)
     samples = np.squeeze(samples)
