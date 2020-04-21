@@ -3,8 +3,9 @@ import tensorflow_probability as tfp
 import numpy as np
 from autoregressive_flow import ARFlow
 
-# TODO: batch norm? bigger model? tanh?
-# TODO: nan loss and neg loss
+# TODO: batch norm?
+# TODO: nan loss
+# TODO: neg loss?
 # TODO: dequantize the data and scale, account for in loss scaling
 
 class PixelCNNARFlow(ARFlow):
