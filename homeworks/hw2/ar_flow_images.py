@@ -11,17 +11,18 @@ class PixelCNNARFlow(ARFlow):
     Wraps the model with function handles and training code
     PixelCNN outputs with an autoregressive flow of mixture of Gaussians
     """
-    def __init__(self, H, W, C, k, lr=10e-3, scale_loss=1):
+    def __init__(self, H, W, C, k, lr=10e-3, scale_loss=1, clip_norm=0.1):
         """
         :param H, W, C: height and width and # channels of image, assumed single, real-valued channel
         :param k: # gaussians in mixture
         :param lr: learning rate for training
         :param scale_loss: scale loss (multiply) to account for any scaling to inputs
+        :param clip_norm: clip by global norm for gradients during training
         """
         self.H, self.W, self.C = H, W, C
         n_vars = self.H * self.W * self.C  # a var per pixel
         self.k = k
-        super().__init__(n_vars, lr=lr, scale_loss=scale_loss)
+        super().__init__(n_vars, lr=lr, scale_loss=scale_loss, clip_norm=clip_norm)
 
     def setup_model(self):
         """
