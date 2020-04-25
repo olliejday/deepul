@@ -20,7 +20,7 @@ class ARFlow:
         self.n_vars = n_vars
         self.model = self.setup_model()
         self.clip_norm = clip_norm
-        self.scale_loss = scale_loss
+        self.scale_loss_log = tf.math.log(tf.cast(scale_loss, tf.float32))
 
     def train(self, x):
         """
@@ -39,14 +39,18 @@ class ARFlow:
 
     def loss(self, x):
         """
-        Returns loss for batch (1,) in nats / dim
+        Returns negative log prob for batch (1,) in nats / dim
+        We scale (in logs) based on preprocessing (scale_loss)
+        And scale by number of variables for nats / dim
         """
         log_p_x = self.log_p_x(x)
-        return - self.scale_loss * tf.reduce_mean(log_p_x) / self.n_vars
+        # log_p_x is (bs,) summed over vars so need to get mean over number of vars for nats / dim
+        # scale (in log space) to account for preprocessing scaling
+        return - tf.reduce_mean(log_p_x) / self.n_vars + self.scale_loss_log
 
     def log_p_x(self, x):
         """
-        Returns log prob of given xs (bs, n_vars)
+        Returns log (joint) prob of given xs (bs,)
         """
         x = tf.cast(x, tf.float32)
         # zi are uniform -> p(zi) /propto 1 -> log p (zi) = 0

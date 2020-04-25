@@ -5,7 +5,6 @@ from autoregressive_flow import ARFlow
 
 # TODO: -ve loss - why???
 
-
 class PixelCNNARFlow(ARFlow):
     """
     Wraps the model with function handles and training code
@@ -101,15 +100,11 @@ class PixelCNNARFlowModel(tf.keras.Model):
         :param x: (bs, H, W, C) batch image inputs
         :return: (bs,)
         """
-        # clip for numerical stability
-        log_pdf = tf.math.log(tf.maximum(self.pdf(x), 1e-9))
+        dist = self._get_distribution(x)
+        log_pdf = dist.log_prob(x)
         # reshape so that works with AR flow which assumes (bs, n_vars) data
         log_pdf = tf.reshape(log_pdf, (-1, self.H * self.W * self.C))
         return log_pdf
-
-    def pdf(self, x):
-        dist = self._get_distribution(x)
-        return dist.prob(x)
 
     def sample(self, n, seed=123):
         """
@@ -337,7 +332,7 @@ def train_pixelcnn_ar(model, train_data, test_data, n_epochs, bs):
 
     # train model
     for epoch in range(n_epochs):
-        for i, batch in enumerate(train_iter):
+        for batch in train_iter:
             train_loss = model.train(batch).numpy()
             train_losses.append(train_loss)
         test_loss = test_loss_batch(model, test_iter)
@@ -375,7 +370,7 @@ if __name__ == "__main__":
 
     scale = 2
     x = dequantise_and_scale(x, scale)
-    model = PixelCNNARFlow(H, W, C, k, scale_loss=scale, lr=10e-4)
+    model = PixelCNNARFlow(H, W, C, k, scale_loss=scale, lr=10e-4, clip_norm=0.1)
 
     _, test_losses, samples = train_pixelcnn_ar(model, x, x, 25, 128)
     print("\n".join(map(str, test_losses)))
