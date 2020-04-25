@@ -3,7 +3,6 @@ import tensorflow_probability as tfp
 import numpy as np
 from autoregressive_flow import ARFlow
 
-# TODO: -ve loss - why???
 
 class PixelCNNARFlow(ARFlow):
     """
