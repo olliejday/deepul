@@ -3,7 +3,7 @@ import tensorflow_probability as tfp
 import numpy as np
 from autoregressive_flow import ARFlow
 
-# TODO: trains well :) neg loss - why???
+# TODO: -ve loss - why???
 
 
 class PixelCNNARFlow(ARFlow):
@@ -289,6 +289,22 @@ class PixelCNNModel(tf.keras.Model):
         return x
 
 
+"""
+Training and data
+"""
+
+def test_loss_batch(model, dataset):
+    """
+    model to evaluate
+    tf.data.Dataset batched ready to iter
+    """
+    loss, n = 0, 0
+    for batch in dataset:
+        loss += len(batch) * model.loss(batch).numpy()
+        n += len(batch)
+    return loss / n
+
+
 def train_pixelcnn_ar(model, train_data, test_data, n_epochs, bs):
     """
     model must have .train(batch) returns loss
@@ -307,6 +323,8 @@ def train_pixelcnn_ar(model, train_data, test_data, n_epochs, bs):
     # create data loaders
     train_dataset = tf.data.Dataset.from_tensor_slices(train_data)
     train_iter = train_dataset.shuffle(bs * 2).batch(bs)
+    test_dataset = tf.data.Dataset.from_tensor_slices(test_data)
+    test_iter = test_dataset.shuffle(bs * 2).batch(bs)
 
     # store losses
     train_losses = []
@@ -321,11 +339,16 @@ def train_pixelcnn_ar(model, train_data, test_data, n_epochs, bs):
         for i, batch in enumerate(train_iter):
             train_loss = model.train(batch).numpy()
             train_losses.append(train_loss)
-        test_loss = model.loss(test_data).numpy()
+        test_loss = test_loss_batch(model, test_iter)
         test_losses.append(test_loss)
 
     # samples
-    samples = model.sample(100)
+    n_sample = 100
+    bs_sample = 50  # had some memory problems sampling so lower bs
+    samples = []
+    for i in range(n_sample // bs_sample):
+        samples.append(model.sample(bs_sample))
+    samples = np.vstack(samples)
 
     return train_losses, test_losses, samples
 
