@@ -3,9 +3,8 @@ import tensorflow_probability as tfp
 import numpy as np
 from autoregressive_flow import ARFlow
 
-# TODO: improve performance -  bug?
-# TODO: nan loss
-# TODO: neg loss
+# TODO: trains well :) neg loss - why???
+
 
 class PixelCNNARFlow(ARFlow):
     """
@@ -103,6 +102,8 @@ class PixelCNNARFlowModel(tf.keras.Model):
         """
         # clip for numerical stability
         log_pdf = tf.math.log(tf.maximum(self.pdf(x), 1e-9))
+        # reshape so that works with AR flow which assumes (bs, n_vars) data
+        log_pdf = tf.reshape(log_pdf, (-1, self.H * self.W * self.C))
         return log_pdf
 
     def pdf(self, x):
