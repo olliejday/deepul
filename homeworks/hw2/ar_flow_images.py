@@ -6,23 +6,23 @@ from autoregressive_flow import ARFlow
 # TODO: improve performance -  bug?
 # TODO: nan loss
 # TODO: neg loss
-# TODO: dequantize the data and scale, account for in loss scaling
 
 class PixelCNNARFlow(ARFlow):
     """
     Wraps the model with function handles and training code
     PixelCNN outputs with an autoregressive flow of mixture of Gaussians
     """
-    def __init__(self, H, W, C, k, lr=10e-3):
+    def __init__(self, H, W, C, k, lr=10e-3, scale_loss=1):
         """
         :param H, W, C: height and width and # channels of image, assumed single, real-valued channel
         :param k: # gaussians in mixture
-        :param lr: learning rate
+        :param lr: learning rate for training
+        :param scale_loss: scale loss (multiply) to account for any scaling to inputs
         """
         self.H, self.W, self.C = H, W, C
         n_vars = self.H * self.W * self.C  # a var per pixel
         self.k = k
-        super().__init__(n_vars, lr)
+        super().__init__(n_vars, lr=lr, scale_loss=scale_loss)
 
     def setup_model(self):
         """
@@ -43,7 +43,7 @@ class PixelCNNARFlowModel(tf.keras.Model):
     """
     PixelCNN outputs a mixture of Gaussians for each (B&W, real valued) pixel for an autoregressive flow
     """
-    def __init__(self, H, W, C, k, factorised=True, n_filters=64, n_res=7, **kwargs):
+    def __init__(self, H, W, C, k, factorised=True, n_filters=64, n_res=5, **kwargs):
         """
         :param H, W, C: height and width and # channels of image, assumed single, real-valued channel
         :param k: # gaussians in mixture
@@ -92,7 +92,6 @@ class PixelCNNARFlowModel(tf.keras.Model):
         :return: (bs,)
         """
         dist = self._get_distribution(x)
-        # TODO: check shapes
         return dist.cdf(x)
 
     def log_pdf(self, x):
@@ -108,7 +107,6 @@ class PixelCNNARFlowModel(tf.keras.Model):
 
     def pdf(self, x):
         dist = self._get_distribution(x)
-        # TODO: check shape
         return dist.prob(x)
 
     def sample(self, n, seed=123):
@@ -290,22 +288,74 @@ class PixelCNNModel(tf.keras.Model):
         return x
 
 
+def train_pixelcnn_ar(model, train_data, test_data, n_epochs, bs):
+    """
+    model must have .train(batch) returns loss
+        .loss(batch) returns loss
+        .sample(n) returns n samples
+
+    Scale data before input.
+    train_data: An (n_train, 2) numpy array of floats in R^2
+    test_data: An (n_test, 2) numpy array of floats in R^2
+
+    Returns
+    - a (# of training iterations,) numpy array of train_losses evaluated every minibatch
+    - a (# of epochs + 1,) numpy array of test_losses evaluated once at initialization and after each epoch
+    - a (100, H, W, C) 100 samples from model
+    """
+    # create data loaders
+    train_dataset = tf.data.Dataset.from_tensor_slices(train_data)
+    train_iter = train_dataset.shuffle(bs * 2).batch(bs)
+
+    # store losses
+    train_losses = []
+    test_losses = []
+
+    # initial test loss
+    test_loss = model.loss(test_data).numpy()
+    test_losses.append(test_loss)
+
+    # train model
+    for epoch in range(n_epochs):
+        for i, batch in enumerate(train_iter):
+            train_loss = model.train(batch).numpy()
+            train_losses.append(train_loss)
+        test_loss = model.loss(test_data).numpy()
+        test_losses.append(test_loss)
+
+    # samples
+    samples = model.sample(100)
+
+    return train_losses, test_losses, samples
+
+
+def dequantise_and_scale(data, scale):
+    """
+    Dequantise and scale to [0, 1]
+    Dequantise = add [0, 1] uniform noise
+    Assumes data is [0, 1] so then divide by scale = 2. to get back on [0, 1] after dequantise.
+    """
+    data = data + np.random.random(np.shape(data))
+    data /= scale
+    return data
+
+
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     H, W, C = 5, 5, 1
-    k = 5
+    k = 7
     factorised = True
-    model = PixelCNNARFlow(H, W, C, k)
     bs = 128
     x = np.stack([np.eye(5)] * bs).reshape((bs, H, W, C))
-    # dequantise
-    x = x + np.random.random((bs, H, W, C))
-    # scale to [0, 1]
-    x = x / np.max(x)
-    for i in range(20):
-        print(model.train(x))
-    samples = model.sample(3)
-    samples = np.squeeze(samples)
+
+    scale = 2
+    x = dequantise_and_scale(x, scale)
+    model = PixelCNNARFlow(H, W, C, k, scale_loss=scale, lr=10e-4)
+
+    _, test_losses, samples = train_pixelcnn_ar(model, x, x, 25, 128)
+    print("\n".join(map(str, test_losses)))
+
+    samples = np.squeeze(samples[:10])
     plt.imshow(np.hstack(samples), cmap="gray")
     plt.title("samples")
     plt.show()

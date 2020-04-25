@@ -9,13 +9,18 @@ class ARFlow:
     """
     Wraps the model with function handles and training code
     """
-    def __init__(self, n_vars, lr=10e-3):
+    def __init__(self, n_vars, lr=10e-3, clip_norm=1, scale_loss=1):
         """
-        :param n_vars: number of 1D variables to model
+        :param n_vars: number of variables
+        :param lr: learning rate for training
+        :param clip_norm: clip global norm of gradients during training
+        :param scale_loss: scale loss (multiply) to account for any scaling to inputs
         """
         self.optimiser = tf.optimizers.Adam(learning_rate=lr)
         self.n_vars = n_vars
         self.model = self.setup_model()
+        self.clip_norm = clip_norm
+        self.scale_loss = scale_loss
 
     def train(self, x):
         """
@@ -25,6 +30,7 @@ class ARFlow:
         with tf.GradientTape() as tape:
             loss = self.loss(x)
         grads = tape.gradient(loss, self.model.trainable_variables)
+        grads, _ = tf.clip_by_global_norm(grads, self.clip_norm)
         self.optimiser.apply_gradients(zip(grads, self.model.trainable_variables))
         return loss
 
@@ -36,7 +42,7 @@ class ARFlow:
         Returns loss for batch (1,) in nats / dim
         """
         log_p_x = self.log_p_x(x)
-        return - tf.reduce_mean(log_p_x) / self.n_vars
+        return - self.scale_loss * tf.reduce_mean(log_p_x) / self.n_vars
 
     def log_p_x(self, x):
         """
