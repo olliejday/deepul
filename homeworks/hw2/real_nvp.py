@@ -4,11 +4,63 @@ import numpy as np
 
 
 class RealNVP:
-    def __init__(self):
+    def __init__(self, H, W, C, N, clip_norm=1.):
+        """
+        :param H, W, C: the height, width and number channels of image input
+        :param N: number of values each variable (channel of pixel) can take
+        :param clip_norm: clip gradient norm before update
+        """
+        # TODO: setup opt
         # Adam Optimizer with a warmup over 200 steps till a learning rate of 5e-4.
         # We didn’t decay the learning rate but it is a generally recommended practice while training generative models
         self.optimiser = None
-    # TODO
+        self.clip_norm = clip_norm
+        self.N = N
+        self.n_vars = H * W * C
+        self.model = self.setup_model()
+
+    def train(self, x):
+        """
+        Run training step
+        Returns loss for batch (1,)
+        """
+        with tf.GradientTape() as tape:
+            loss = self.loss(x)
+        grads = tape.gradient(loss, self.model.trainable_variables)
+        grads, _ = tf.clip_by_global_norm(grads, self.clip_norm)
+        self.optimiser.apply_gradients(zip(grads, self.model.trainable_variables))
+        return loss
+
+    def setup_model(self):
+        return RealNVPModel(self.N)
+
+    def loss(self, x):
+        """
+        Returns negative log prob for batch (1,) in nats / dim
+        We scale (in logs) based on preprocessing (scale_loss)
+        And scale by number of variables for nats / dim
+        """
+        log_p_x = self.log_p_x(x)
+        # log_p_x is (bs,) summed over vars so need to get mean over number of vars for nats / dim
+        # scale (in log space) to account for preprocessing scaling
+        return - tf.reduce_mean(log_p_x) / self.n_vars
+
+    def log_p_x(self, x):
+        """
+        Returns log (joint) prob of given xs (bs,)
+        """
+        x = tf.cast(x, tf.float32)
+        _, log_det_jac = self.model(x)
+        return tf.reduce_sum(log_det_jac, axis=-1)
+
+    def f_x(self, x):
+        """
+        Returns z values for given xs (bs, h, w, c)
+        """
+        x = tf.cast(x, tf.float32)
+        z, _ = self.model(x)
+        return z
+
 
 class ActNorm(tf.keras.layers.Layer):
     """
@@ -124,6 +176,7 @@ class RealNVPModel(tf.keras.Model):
         log_det_jac = np.zeros(np.shape(inputs)[1:])  # ignore batch size
         for layer in self._layers:
             z, log_det = layer(z)
+            # TODO: how will this sum work over different numbers of filters?
             log_det_jac += log_det
         # we use logit trick so have to invert to map to data
         # TODO (note) is this how we map z and log_det_jac?
