@@ -8,47 +8,128 @@ class RealNVP:
         # Adam Optimizer with a warmup over 200 steps till a learning rate of 5e-4.
         # We didn’t decay the learning rate but it is a generally recommended practice while training generative models
         self.optimiser = None
-
+    # TODO
 
 class ActNorm(tf.keras.layers.Layer):
-    # TODO: will just batch norm do?
-    pass
+    """
+    Described in Glow (Kingma & Dhariwal) Section 3.1
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # use first call to initialise from data
+        self.is_initialised = False
+
+    def build(self, input_shape):
+        # define the parameters, reinititialised in first call (data-dependent)
+        self._weight = self.add_weight("weight", shape=input_shape[1:])
+        self._bias = self.add_weight("bias", shape=input_shape[1:])
+        self.H, self.W = input_shape[1:3]
+        super().build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        """
+        :param x: inputs
+        :return: z, log_det
+        Where z is the forward pass f(x)
+        log_det is the log-determinant of f(x)
+        """
+        if not self.is_initialised:
+            self.init_kernel(inputs)
+        z = self.f_x(inputs)
+        log_det = self.log_det()
+        return z, log_det
+
+    def log_det(self):
+        """
+        Compute log-det of f(x)
+        """
+        return self.H * self.W * tf.reduce_sum(tf.math.log(tf.abs(self._weight)))
+
+    def f_x(self, inputs):
+        """
+        Compute function of act-norm z = f_x(x)
+        """
+        return self._weight * inputs + self._bias
+
+    def init_kernel(self, inputs):
+        """
+        As per paper, data dependent init so post-act norm per channel has zero mean and unit std deviation
+        :param inputs: batch of data [bs, H, W, C]
+        """
+        # post act norm
+        outs = self.f_x(inputs)
+        # get statistics per channel
+        mean_t = tf.reduce_mean(outs, axis=[0, 1, 2])
+        stddev_t = tf.math.reduce_std(outs, axis=[0, 1, 2])
+        # init weights
+        self._weight = 1. / stddev_t
+        self._bias = - mean_t / stddev_t
+        # initialised ok
+        self.is_initialised = True
 
 
 class Squeeze(tf.keras.layers.Layer):
-    # TODO: reshape to channels
-    pass
+    """
+    Reshape to channels
+    [b, h, w, c] --> [b, h//2, w//2, c*4]
+    """
+    def call(self, inputs, **kwargs):
+        bs, h, w, c = tf.shape(inputs)
+        return tf.reshape(inputs, (bs, h // 2, w // 2, c * 4))
 
 
 class Unsqueeze(tf.keras.layers.Layer):
-    # TODO: reshape back
-    pass
+    """
+    [b, h//2, w//2, c*4] --> [b, h, w, c]
+    """
+    def call(self, inputs, **kwargs):
+        bs, h, w, c = tf.shape(inputs)
+        return tf.reshape(inputs, (bs, h * 2, w * 2, c // 4))
 
 
 class RealNVPModel(tf.keras.Model):
-    # TODO: weight normalisation for init
+    def __init__(self, N, n_filters=128, *args, **kwargs):
+        """
+        :param N: number of values each variable (channel of pixel) can take
+        :param n_filters: number filters each conv layer
+        """
+        self.N = N
+        self.n_filters = n_filters
+        super().__init__(*args, **kwargs)
+
     def build(self, input_shape):
         # Model from paper Dinh et al, architecture from course homework handout
         self._layers = []
         for _ in range(4):
-            self._layers.append(AffineCouplingWithCheckerboard())  # Figure 3 in Dinh et al - (left)
-            self._layers.append(ActNorm())  # described in Glow (Kingma & Dhariwal) Section 3.1
-        self._layers.append(Squeeze()),  # [b, h, w, c] --> [b, h//2, w//2, c*4]
+            self._layers.append(AffineCouplingWithCheckerboard(self.n_filters))
+            self._layers.append(ActNorm())
+        self._layers.append(Squeeze())
 
         for _ in range(3):
-            self._layers.append(AffineCouplingWithChannel())
+            self._layers.append(AffineCouplingWithChannel(self.n_filters))
             self._layers.append(ActNorm())
-        self._layers.append(Unsqueeze())  # [b, h//2, w//2, c*4] --> [b, h, w, c]
+        self._layers.append(Unsqueeze())
 
         for _ in range(3):
-            self._layers.append(AffineCouplingWithCheckerboard())
+            self._layers.append(AffineCouplingWithCheckerboard(self.n_filters))
             self._layers.append(ActNorm())
+
+        # output correct shape
+        c = input_shape[-1]
+        self._layers.append(AffineCouplingWithCheckerboard(c))
 
     def call(self, inputs, training=None, mask=None):
-        x = inputs
+        z = inputs
+        # diagonal jacobian so log det jac is sum of log dets
+        log_det_jac = np.zeros(np.shape(inputs)[1:])  # ignore batch size
         for layer in self._layers:
-            x = layer(x)
-        return x
+            z, log_det = layer(z)
+            log_det_jac += log_det
+        # we use logit trick so have to invert to map to data
+        # TODO (note) is this how we map z and log_det_jac?
+        z = inverse_logit_trick(z, self.N)
+        log_det_jac = inverse_logit_trick(log_det_jac, self.N)
+        return z, log_det_jac
 
 
 class ResnetBlock(tf.keras.layers.Layer):
@@ -58,16 +139,51 @@ class ResnetBlock(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         self._layers = []
-        # TODO: pseudocode had in and out as padding=0 and middle as padding=1
-        self._layers.append(tf.keras.layers.Conv2D(self.n_filters, (1, 1), stride=1, padding="VALID"))
-        self._layers.append(tf.keras.layers.Conv2D(self.n_filters, (3, 3), stride=1, padding="SAME"))
-        self._layers.append(tf.keras.layers.Conv2D(self.n_filters, (1, 1), stride=1, padding="VALID"))
+        # TODO (Note): pseudocode had in and out as padding=0 and middle as padding=1
+        self._layers.append(Conv2D(self.n_filters, (1, 1), stride=1, padding="VALID"))
+        self._layers.append(Conv2D(self.n_filters, (3, 3), stride=1, padding="SAME"))
+        self._layers.append(Conv2D(self.n_filters, (1, 1), stride=1, padding="VALID"))
 
     def call(self, inputs, **kwargs):
         x = inputs
         for layer in self._layers:
             x = layer(x)
         return x + inputs
+
+
+class Conv2D(tf.keras.layers.Conv2D):
+    """
+    Overwrite Conv2D with data dependent weight initialisation
+    as per Weight Normalisation, Salimans and Kingma, 2016
+    """
+    def __init__(self, seed=123, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # use first call to initialise from data
+        self.is_initialised = False
+        self.seed = seed
+
+    def call(self, inputs):
+        # use first call to initialise
+        if not self.is_initialised:
+            self.init_kernel(inputs)
+        return super().call(inputs)
+
+    def init_kernel(self, inputs):
+        # sample v from Normal mean 0 and stddev 0.05
+        v = tfp.distributions.Normal(np.zeros(self.kernel_size), np.ones(self.kernel_size) * 0.05).sample(1, seed=self.seed)
+        # pre activation
+        v_norm = tf.norm(v)
+        t = v * inputs / v_norm
+        # get statistics
+        mean_t = tf.reduce_mean(t, axis=0)
+        stddev_t = tf.math.reduce_std(t, axis=0)
+        # params to init weights
+        g = 1. / stddev_t
+        b = - mean_t / stddev_t
+        # init weights
+        self.kernel = v * g / v_norm
+        # initialised ok
+        self.is_initialised = True
 
 
 class SimpleResnet(tf.keras.layers.Layer):
@@ -79,12 +195,12 @@ class SimpleResnet(tf.keras.layers.Layer):
 
     def build(self, **kwargs):
         self._layers = []
-        # TODO: pseudocode has padding=1 what does this mean in tf - think it could be same as this means output same size
-        self._layers.append(tf.keras.layers.Conv2D(self.n_filters, (3, 3), strides=1, padding="SAME",
+        # TODO (Note): pseudocode has padding=1 what does this mean in tf - think it could be same as this means output same size
+        self._layers.append(Conv2D(self.n_filters, (3, 3), strides=1, padding="SAME",
                                                    activation="relu"))
         for _ in range(self.n_layers):
             self._layers.append(ResnetBlock(self.n_filters))
-        self._layers.append(tf.keras.layers.Conv2D(self.n_out, (3, 3), stride=1, padding="SAME"))
+        self._layers.append(Conv2D(self.n_out, (3, 3), stride=1, padding="SAME"))
 
     def call(self, x, **kwargs):
         for layer in self._layers:
@@ -93,23 +209,34 @@ class SimpleResnet(tf.keras.layers.Layer):
 
 
 class AffineCoupling(tf.keras.layers.Layer):
-    def __init__(self, **kwargs):
+    def __init__(self, n_out, **kwargs):
+        """
+        :param n_out: number of filers output
+        """
         super().__init__(**kwargs)
         self.mask = None
-        self.n_out = None  # TODO
+        self.n_out = n_out
 
     def get_mask(self, input_shape):
         """
         Overwrite to setup mask
-        :return: mask to mask input to resnet
+        :param input_shape: (bs, H, W, C)
+        :return: mask (0, 1) of shape (H, W, C)
         """
         raise NotImplementedError
 
     def build(self, input_shape):
         self.mask = self.get_mask(input_shape)
-        self.resnet = SimpleResnet(self.n_out)
+        # double output size for t and s
+        self.resnet = SimpleResnet(self.n_out * 2)
 
     def call(self, x, **kwargs):
+        """
+        :param x: inputs
+        :return: z, log_det_jacobian
+        Where z is the forward pass f(x)
+        log_det_jacobian is the log-determinant of f(x)
+        """
         x_masked = x * self.mask
         resnet = self.resnet(x_masked)
         log_scale, t = tf.split(resnet, 2, axis=-1)
@@ -122,14 +249,64 @@ class AffineCoupling(tf.keras.layers.Layer):
 
 
 class AffineCouplingWithCheckerboard(AffineCoupling):
-    pass
+    """
+    Figure 3 in Dinh et al - (left)
+    """
+    def get_mask(self, input_shape):
+        # checkerboard mask
+        return np.indices(input_shape[1:]).sum(axis=0) % 2
 
 
 class AffineCouplingWithChannel(AffineCoupling):
+    def get_mask(self, input_shape):
+        mask = np.ones(input_shape[1:])
+        # mask out 1st half channel
+        mask[:, :, :input_shape[-1] // 2] = 0.
+        return mask
+
+
+def logit_trick(x, n, a=0.05):
+    """
+    logit trick from RealNVP (Dinh et al) Section 4.1
+    :param x: inputs (in data-space)
+    :param n: number of values x can take
+    :param a: alpha hyper param, default=0.05 as paper
+    :return: same shape as x
+    """
+    # pre-logit
+    p = a + (1 - a) * x / n
+    # log odds function
+    return np.log(p) - np.log(1 - p)
+
+
+def inverse_logit_trick(y, n, a=0.05):
+    """
+    inverse of logit trick to map back to data
+    :param y: inputs (in logit-trick-space)
+    :param n: number of values x can take
+    :param a: alpha hyper param, default=0.05 as paper
+    :return: same shape as y
+    """
+    # sigmoid is inverse logit function
+    p = 1. / (1. + np.exp(-y))
+    return n * (p - a) / (1 - a)
+
+
+def preprocess(data, n, alpha=0.05):
+    """
+    Preprocess the data - dequantise and logit trick from RealNVP (Dinh et al) Section 4.1
+    :param data: input data (N, H, W, C) N examples, H,W,C image shape
+    :param n: number of values each variable can take on
+    :param alpha: hyper param, default=0.05 as paper
+    :return: same shape as input, preprocessed
+    """
+    # dequantization
+    data = data + np.random.random(np.shape(data))
+    # logit trick
+    data = logit_trick(data, n, alpha)
+    return data
+
+
+if __name__ == "__main__":
+    # TODO: test each part and build on up!
     pass
-
-
-def preprocess():
-    # TODO
-    # dequantization, logit trick from RealNVP (Dinh et al) Section 4.1
-    return None
