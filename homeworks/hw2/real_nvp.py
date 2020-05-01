@@ -90,6 +90,9 @@ class RealNVP:
         return z
 
 
+# TODO: add sampling - see (8) in paper
+# TODO: add interpolation
+# TODO: add log p (z) to loss
 class RealNVPModel(tf.keras.Model):
     def __init__(self, N, n_filters=128, *args, **kwargs):
         """
@@ -341,15 +344,12 @@ class AffineCoupling(tf.keras.layers.Layer):
         # element wise mask
         x_masked = x * self.mask
         resnet = self.resnet(x_masked)
-        tf.debugging.check_numerics(resnet, "resnet outs")
         log_scale, t = tf.split(resnet, 2, axis=-1)
         # calculate log_scale, as done in Q1(b)
         t = t * (1.0 - self.mask)
         log_scale = log_scale * (1.0 - self.mask)
         z = x * tf.exp(log_scale) + t
         log_det_jacobian = log_scale
-        tf.debugging.check_numerics(z, "z " + self.name + str(log_scale[3, 0, 1, 1]))
-        tf.debugging.check_numerics(log_det_jacobian, "log det jac / log scale")
         return z, tf.reduce_sum(log_det_jacobian, [1, 2, 3])
 
 
@@ -420,7 +420,7 @@ if __name__ == "__main__":
     real_nvp = RealNVP(h, w, c, n)
 
     bs = 64
-    x = np.stack([np.eye(h)] * bs * 2).reshape((bs, h, w, c))
+    x = np.stack([np.eye(h) * np.random.randint(0, 3, (h,))] * bs * 2).reshape((bs, h, w, c))
     x = preprocess(x, n)
 
     for i in range(5):
