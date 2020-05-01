@@ -3,17 +3,43 @@ import tensorflow_probability as tfp
 import numpy as np
 
 
+class AdamLRSchedule:
+    def __init__(self, start_lr, end_lr, n_steps):
+        """
+        Warm up the learning rate in the optimizer
+        From 0 to steps, linearly interpolates between start_lr and end_lr, then onwards uses end_lr
+        :param start_lr: start learning rate
+        :param end_lr: end learning rate
+        :param n_steps: number of steps to warm up in
+        """
+        self.start_lr = start_lr
+        self.end_lr = end_lr
+        self.n_steps = n_steps
+        # init optimiser and step count
+        self.optimiser = None
+        self.step = 0
+
+    def __call__(self):
+        """
+        :return: tf.optimizers.Adam object with current learning rate at step
+        """
+        # linearly interpolate up to n_steps, otherwise keep same Adam object so it can use momentum
+        if self.step < self.n_steps:
+            lr = self.start_lr + (self.end_lr - self.start_lr) * (self.step / self.n_steps)
+            self.optimiser = tf.optimizers.Adam(lr)
+        self.step += 1
+        return self.optimiser
+
+
 class RealNVP:
-    def __init__(self, H, W, C, N, clip_norm=1.):
+    def __init__(self, H, W, C, N, lr=5e-4, clip_norm=1.):
         """
         :param H, W, C: the height, width and number channels of image input
         :param N: number of values each variable (channel of pixel) can take
         :param clip_norm: clip gradient norm before update
         """
-        # TODO: setup opt
-        # Adam Optimizer with a warmup over 200 steps till a learning rate of 5e-4.
-        # We didn’t decay the learning rate but it is a generally recommended practice while training generative models
-        self.optimiser = None
+        # warm up 200 steps
+        self.optimiser = AdamLRSchedule(lr / 100, lr, 200)
         self.clip_norm = clip_norm
         self.N = N
         self.n_vars = H * W * C
@@ -28,7 +54,9 @@ class RealNVP:
             loss = self.loss(x)
         grads = tape.gradient(loss, self.model.trainable_variables)
         grads, _ = tf.clip_by_global_norm(grads, self.clip_norm)
-        self.optimiser.apply_gradients(zip(grads, self.model.trainable_variables))
+        # get the optimiser for this step
+        self.optimiser().apply_gradients(zip(grads, self.model.trainable_variables))
+        # update steps for learning rate schedule
         return loss
 
     def setup_model(self):
@@ -62,10 +90,65 @@ class RealNVP:
         return z
 
 
+class RealNVPModel(tf.keras.Model):
+    def __init__(self, N, n_filters=128, *args, **kwargs):
+        """
+        :param N: number of values each variable (channel of pixel) can take
+        :param n_filters: number filters each conv layer
+        """
+        self.N = N
+        self.n_filters = n_filters
+        super().__init__(*args, **kwargs)
+
+    def build(self, input_shape):
+        # Model from paper Dinh et al, architecture from course homework handout
+        self._layer_group1 = []
+        for _ in range(4):
+            self._layer_group1.append(AffineCouplingWithCheckerboard(self.n_filters))
+            self._layer_group1.append(ActNorm())
+        self.squeeze = Squeeze()
+
+        self._layer_group2 = []
+        for _ in range(3):
+            self._layer_group2.append(AffineCouplingWithChannel(self.n_filters))
+            self._layer_group2.append(ActNorm())
+        self.unsqueeze = Unsqueeze()
+
+        self._layer_group3 = []
+        for _ in range(3):
+            self._layer_group3.append(AffineCouplingWithCheckerboard(self.n_filters))
+            self._layer_group3.append(ActNorm())
+
+    def call(self, inputs, training=None, mask=None):
+        z = inputs
+        # diagonal jacobian so log det jac is sum of log dets
+        # TODO (note) summing log_det in outputs from affinecouple layers - not sure this is right but shapes don't match o/w
+        log_det_jac = 0
+        # pass through model, model is grouped in layers by masking pattern with un/squeeze ops
+        for layer in self._layer_group1:
+            z, log_det = layer(z)
+            log_det_jac += log_det
+        z = self.squeeze(z)
+        for layer in self._layer_group2:
+            z, log_det = layer(z)
+            log_det_jac += log_det
+        z = self.unsqueeze(z)
+        for layer in self._layer_group3:
+            z, log_det = layer(z)
+            log_det_jac += log_det
+        # we use logit trick so have to invert to map to data
+        # TODO (note) is this how we map z and log_det_jac?
+        # TODO: loss nan w/out inv logit trick, but grads 0 with inv logit trick
+        # z = inverse_logit_trick(z, self.N)
+        # log_det_jac = inverse_logit_trick(log_det_jac, self.N)
+        return z, log_det_jac
+
+
 class ActNorm(tf.keras.layers.Layer):
     """
     Described in Glow (Kingma & Dhariwal) Section 3.1
     """
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # use first call to initialise from data
@@ -108,14 +191,13 @@ class ActNorm(tf.keras.layers.Layer):
         As per paper, data dependent init so post-act norm per channel has zero mean and unit std deviation
         :param inputs: batch of data [bs, H, W, C]
         """
-        # post act norm
-        outs = self.f_x(inputs)
         # get statistics per channel
-        mean_t = tf.reduce_mean(outs, axis=[0, 1, 2])
-        stddev_t = tf.math.reduce_std(outs, axis=[0, 1, 2])
+        mean_t = tf.reduce_mean(inputs, axis=[0, 1, 2])
+        stddev_t = tf.math.reduce_std(inputs, axis=[0, 1, 2])
         # init weights
-        self._weight = 1. / stddev_t
-        self._bias = - mean_t / stddev_t
+        self._weight = tf.Variable(1. / stddev_t, name="weight", trainable=True)
+        # bias not trainable, since doesn't appear in log det
+        self._bias = tf.Variable(- mean_t / stddev_t, name="bias", trainable=False)
         # initialised ok
         self.is_initialised = True
 
@@ -139,59 +221,6 @@ class Unsqueeze(tf.keras.layers.Layer):
         return tf.reshape(inputs, (bs, h * 2, w * 2, c // 4))
 
 
-class RealNVPModel(tf.keras.Model):
-    def __init__(self, N, n_filters=128, *args, **kwargs):
-        """
-        :param N: number of values each variable (channel of pixel) can take
-        :param n_filters: number filters each conv layer
-        """
-        self.N = N
-        self.n_filters = n_filters
-        super().__init__(*args, **kwargs)
-
-    def build(self, input_shape):
-        # Model from paper Dinh et al, architecture from course homework handout
-        self._layer_group1 = []
-        for _ in range(4):
-            self._layer_group1.append(AffineCouplingWithCheckerboard(self.n_filters))
-            self._layer_group1.append(ActNorm())
-        self.squeeze = Squeeze()
-
-        self._layer_group2 = []
-        for _ in range(3):
-            self._layer_group2.append(AffineCouplingWithChannel(self.n_filters))
-            self._layer_group2.append(ActNorm())
-        self.unsqueeze = Unsqueeze()
-
-        self._layer_group3 = []
-        for _ in range(3):
-            self._layer_group3.append(AffineCouplingWithCheckerboard(self.n_filters))
-            self._layer_group3.append(ActNorm())
-
-    def call(self, inputs, training=None, mask=None):
-        z = inputs
-        # TODO (note) summing log_det in outputs from affinecouple layers - not sure this is right but shapes don't match o/w
-        # diagonal jacobian so log det jac is sum of log dets
-        log_det_jac = 0
-        # pass through model, model is grouped in layers by masking pattern with un/squeeze ops
-        for layer in self._layer_group1:
-            z, log_det = layer(z)
-            log_det_jac += log_det
-        z = self.squeeze(z)
-        for layer in self._layer_group2:
-            z, log_det = layer(z)
-            log_det_jac += log_det
-        z = self.unsqueeze(z)
-        for layer in self._layer_group3:
-            z, log_det = layer(z)
-            log_det_jac += log_det
-        # we use logit trick so have to invert to map to data
-        # TODO (note) is this how we map z and log_det_jac?
-        z = inverse_logit_trick(z, self.N)
-        log_det_jac = inverse_logit_trick(log_det_jac, self.N)
-        return z, log_det_jac
-
-
 class ResnetBlock(tf.keras.layers.Layer):
     def __init__(self, n_filters=128, **kwargs):
         super().__init__(**kwargs)
@@ -200,9 +229,9 @@ class ResnetBlock(tf.keras.layers.Layer):
     def build(self, input_shape):
         self._layers = []
         # TODO (Note): pseudocode had in and out as padding=0 and middle as padding=1
-        self._layers.append(Conv2D(self.n_filters, (1, 1), strides=1, padding="VALID"))
-        self._layers.append(Conv2D(self.n_filters, (3, 3), strides=1, padding="SAME"))
-        self._layers.append(Conv2D(self.n_filters, (1, 1), strides=1, padding="VALID"))
+        self._layers.append(Conv2D(self.n_filters, (1, 1), activation="relu", strides=1, padding="VALID"))
+        self._layers.append(Conv2D(self.n_filters, (3, 3), activation="relu",  strides=1, padding="SAME"))
+        self._layers.append(Conv2D(self.n_filters, (1, 1), activation="relu",  strides=1, padding="VALID"))
 
     def call(self, inputs, **kwargs):
         x = inputs
@@ -216,6 +245,7 @@ class Conv2D(tf.keras.layers.Conv2D):
     Overwrite Conv2D with data dependent weight initialisation
     as per Weight Normalisation, Salimans and Kingma, 2016
     """
+
     def __init__(self, *args, seed=123, **kwargs):
         super().__init__(*args, **kwargs)
         # use first call to initialise from data
@@ -245,11 +275,13 @@ class Conv2D(tf.keras.layers.Conv2D):
         g = 1. / stddev_t
         b = - mean_t / stddev_t
         # init weights
-        self.kernel = v * g / v_norm
-        self.bias = b
+        self.kernel = tf.Variable(v * g / v_norm, name="kernel", trainable=True)
+        self.bias = tf.Variable(b, name="bias", trainable=True)
         # check ok
-        tf.assert_equal(tf.shape(self.kernel), kernel_shape, "Kernel init to wrong size. Was {}, now {}".format(tf.shape(self.kernel), kernel_shape))
-        tf.assert_equal(tf.shape(self.bias), bias_shape, "Bias init to wrong size. Was {}, now {}".format(tf.shape(self.bias), bias_shape))
+        tf.assert_equal(tf.shape(self.kernel), kernel_shape,
+                        "Kernel init to wrong size. Was {}, now {}".format(tf.shape(self.kernel), kernel_shape))
+        tf.assert_equal(tf.shape(self.bias), bias_shape,
+                        "Bias init to wrong size. Was {}, now {}".format(tf.shape(self.bias), bias_shape))
         # initialised ok
         self.is_initialised = True
 
@@ -265,7 +297,7 @@ class SimpleResnet(tf.keras.layers.Layer):
         self._layers = []
         # TODO (Note): pseudocode has padding=1 what does this mean in tf - think it could be same as this means output same size
         self._layers.append(Conv2D(self.n_filters, (3, 3), strides=1, padding="SAME",
-                                                   activation="relu"))
+                                   activation="relu"))
         for _ in range(self.n_layers):
             self._layers.append(ResnetBlock(self.n_filters))
         self._layers.append(Conv2D(self.n_out, (3, 3), strides=1, padding="SAME"))
@@ -309,12 +341,15 @@ class AffineCoupling(tf.keras.layers.Layer):
         # element wise mask
         x_masked = x * self.mask
         resnet = self.resnet(x_masked)
+        tf.debugging.check_numerics(resnet, "resnet outs")
         log_scale, t = tf.split(resnet, 2, axis=-1)
         # calculate log_scale, as done in Q1(b)
         t = t * (1.0 - self.mask)
         log_scale = log_scale * (1.0 - self.mask)
         z = x * tf.exp(log_scale) + t
         log_det_jacobian = log_scale
+        tf.debugging.check_numerics(z, "z " + self.name + str(log_scale[3, 0, 1, 1]))
+        tf.debugging.check_numerics(log_det_jacobian, "log det jac / log scale")
         return z, tf.reduce_sum(log_det_jacobian, [1, 2, 3])
 
 
@@ -358,9 +393,8 @@ def inverse_logit_trick(y, n, a=0.05):
     :return: same shape as y
     """
     # sigmoid is inverse logit function
-    # TODO: overflow in exp
     p = tf.nn.sigmoid(y)
-    return n * (p - a) / (1 - a)
+    return p # n * (p - a) / (1 - a)
 
 
 def preprocess(data, n, alpha=0.05):
@@ -379,6 +413,8 @@ def preprocess(data, n, alpha=0.05):
 
 
 if __name__ == "__main__":
+    np.random.seed(123)
+
     h, w, c = 6, 6, 2
     n = 3
     real_nvp = RealNVP(h, w, c, n)
@@ -386,5 +422,6 @@ if __name__ == "__main__":
     bs = 64
     x = np.stack([np.eye(h)] * bs * 2).reshape((bs, h, w, c))
     x = preprocess(x, n)
-    for i in range(10):
+
+    for i in range(5):
         print(real_nvp.train(x))
