@@ -12,9 +12,8 @@ class AdamLRSchedule:
         :param end_lr: end learning rate
         :param n_steps: number of steps to warm up in
         """
-        self.start_lr = start_lr
-        self.end_lr = end_lr
         self.n_steps = n_steps
+        self.lrs = linear_interpolate(start_lr, end_lr, n_steps)
         # init optimiser and step count
         self.optimiser = None
         self.step = 0
@@ -25,10 +24,24 @@ class AdamLRSchedule:
         """
         # linearly interpolate up to n_steps, otherwise keep same Adam object so it can use momentum
         if self.step < self.n_steps:
-            lr = self.start_lr + (self.end_lr - self.start_lr) * (self.step / self.n_steps)
+            lr = self.lrs[self.step]
             self.optimiser = tf.optimizers.Adam(lr)
         self.step += 1
         return self.optimiser
+
+
+def linear_interpolate(a, b, n):
+    """
+    Linearly interpolate between a and b in n steps
+    eg. linear_interpolate(0, 4, 3) = [0, 1, 2, 3, 4]
+    :param a: start
+    :param b: stop
+    :param n: number of steps in interpolation (not including end points)
+    :return: n+2 steps from a to b (includes a and b endpoints)
+    """
+    # we want to capture n steps so need n+1 incremements
+    n += 1
+    return [a + (b - a) * (i / n) for i in range(n+1)]
 
 
 class RealNVP:
@@ -78,8 +91,9 @@ class RealNVP:
         Returns log (joint) prob of given xs (bs,)
         """
         x = tf.cast(x, tf.float32)
-        _, log_det_jac = self.model(x)
-        return tf.reduce_sum(log_det_jac, axis=-1)
+        z, log_det_jac = self.model(x)
+        p_z = self.model.get_prior_z().log_pdf(z)
+        return tf.reduce_sum(p_z) + tf.reduce_sum(log_det_jac, axis=-1)
 
     def f_x(self, x):
         """
@@ -89,21 +103,52 @@ class RealNVP:
         z, _ = self.model(x)
         return z
 
+    def interpolate(self, im1, im2, n):
+        """
+        Interpolate between two images
+        :param im1: image 1
+        :param im2: image 2
+        :param n: number of images to interpolate
+        :return: n generated interpolations
+        """
+        # get z values
+        z1 = self.f_x(im1)
+        z2 = self.f_x(im2)
+        # interpolate
+        zs = linear_interpolate(z1, z2, n)[1:-1]
+        # generate images
+        xs = self.model.inverse(zs)
+        return xs
+
+    def sample(self, n):
+        """
+        Sample n images
+        :param n: number of samples
+        :return: n samples
+        """
+        # get zs
+        zs = self.model.get_prior_z().sample(n)
+        # generate images
+        xs = self.model.inverse(zs)
+        return xs
 
 # TODO: add sampling - see (8) in paper
 # TODO: add interpolation
 # TODO: add log p (z) to loss
 class RealNVPModel(tf.keras.Model):
-    def __init__(self, N, n_filters=128, *args, **kwargs):
+    def __init__(self, n_filters=128, *args, **kwargs):
         """
-        :param N: number of values each variable (channel of pixel) can take
         :param n_filters: number filters each conv layer
         """
-        self.N = N
         self.n_filters = n_filters
         super().__init__(*args, **kwargs)
 
     def build(self, input_shape):
+        # store shape
+        self.H, self.W, self.C = input_shape
+        # prior on z; we have a z per channel per pixel of x
+        # standard normal
+        self.prior_z = tfp.distributions.Normal(np.zeros((self.H, self.W, self.C)), np.ones((self.H, self.W, self.C)))
         # Model from paper Dinh et al, architecture from course homework handout
         self._layer_group1 = []
         for _ in range(4):
@@ -145,6 +190,31 @@ class RealNVPModel(tf.keras.Model):
         # z = inverse_logit_trick(z, self.N)
         # log_det_jac = inverse_logit_trick(log_det_jac, self.N)
         return z, log_det_jac
+
+    def inverse(self, zs):
+        """
+        Compute inverse flow x = f^-1(z)
+        :param zs: bacth of zs (bs, H, W, C)
+        :return: xs of shape (bs, H, W, C)
+        """
+        # go through layers of forward pass (call()) in reverse calling .inverse()
+        x = zs
+        for layer in reversed(self._layer_group3):
+            x = layer.inverse(x)
+        # swap squeeze and unsqueeze
+        x = self.squeeze(x)
+        for layer in reversed(self._layer_group2):
+            x = layer.inverse(x)
+        x = self.unsqueeze(x)
+        for layer in reversed(self._layer_group1):
+            x = layer.inverse(x)
+        return x
+
+    def get_prior_z(self):
+        """
+        :return: tfp.distribution, the prior for z (of shape (H, W, C)
+        """
+        return self.prior_z
 
 
 class ActNorm(tf.keras.layers.Layer):
@@ -394,7 +464,7 @@ def inverse_logit_trick(y, n, a=0.05):
     """
     # sigmoid is inverse logit function
     p = tf.nn.sigmoid(y)
-    return p # n * (p - a) / (1 - a)
+    return n * (p - a) / (1 - a)
 
 
 def preprocess(data, n, alpha=0.05):
@@ -415,13 +485,15 @@ def preprocess(data, n, alpha=0.05):
 if __name__ == "__main__":
     np.random.seed(123)
 
-    h, w, c = 6, 6, 2
-    n = 3
-    real_nvp = RealNVP(h, w, c, n)
+    print(linear_interpolate(0, 4, 3))
 
-    bs = 64
-    x = np.stack([np.eye(h) * np.random.randint(0, 3, (h,))] * bs * 2).reshape((bs, h, w, c))
-    x = preprocess(x, n)
-
-    for i in range(5):
-        print(real_nvp.train(x))
+    # h, w, c = 6, 6, 2
+    # n = 3
+    # real_nvp = RealNVP(h, w, c, n)
+    #
+    # bs = 64
+    # x = np.stack([np.eye(h) * np.random.randint(0, 3, (h,))] * bs * 2).reshape((bs, h, w, c))
+    # x = preprocess(x, n)
+    #
+    # for i in range(5):
+    #     print(real_nvp.train(x))
