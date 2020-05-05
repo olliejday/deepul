@@ -13,7 +13,8 @@ class AdamLRSchedule:
         :param n_steps: number of steps to warm up in
         """
         self.n_steps = n_steps
-        self.lrs = linear_interpolate(start_lr, end_lr, n_steps)
+        # n_steps-2 bc the learning rate steps include endpoints as steps whereas lin_interp() does not
+        self.lrs = linear_interpolate(start_lr, end_lr, n_steps-2)
         # init optimiser and step count
         self.optimiser = None
         self.step = 0
@@ -51,6 +52,7 @@ class RealNVP:
         :param N: number of values each variable (channel of pixel) can take
         :param clip_norm: clip gradient norm before update
         """
+        # TODO (note): work on optimiser schedule
         # warm up 200 steps
         self.optimiser = AdamLRSchedule(lr / 100, lr, 200)
         self.clip_norm = clip_norm
@@ -68,7 +70,8 @@ class RealNVP:
         grads = tape.gradient(loss, self.model.trainable_variables)
         grads, _ = tf.clip_by_global_norm(grads, self.clip_norm)
         # get the optimiser for this step
-        self.optimiser().apply_gradients(zip(grads, self.model.trainable_variables))
+        optimiser = self.optimiser()
+        optimiser.apply_gradients(zip(grads, self.model.trainable_variables))
         # update steps for learning rate schedule
         return loss
 
@@ -88,12 +91,17 @@ class RealNVP:
 
     def log_p_x(self, x):
         """
-        Returns log (joint) prob of given xs (bs,)
+        :return: log (joint) prob of given xs (bs,)
+        log p(x) = log p(z) + log det(dz / dx)
         """
         x = tf.cast(x, tf.float32)
+        # forward model and log det term
         z, log_det_jac = self.model(x)
-        p_z = self.model.get_prior_z().log_pdf(z)
-        return tf.reduce_sum(p_z) + tf.reduce_sum(log_det_jac, axis=-1)
+        # prior z
+        log_p_z = self.model.get_prior_z().log_prob(z)
+        # sum over logs is joint
+        log_pz = tf.reduce_sum(log_p_z, axis=[1,2,3])
+        return log_pz + log_det_jac
 
     def f_x(self, x):
         """
@@ -132,9 +140,7 @@ class RealNVP:
         xs = self.model.inverse(zs)
         return xs
 
-# TODO: add sampling - see (8) in paper
-# TODO: add interpolation
-# TODO: add log p (z) to loss
+
 class RealNVPModel(tf.keras.Model):
     def __init__(self, n_filters=128, *args, **kwargs):
         """
@@ -144,11 +150,11 @@ class RealNVPModel(tf.keras.Model):
         super().__init__(*args, **kwargs)
 
     def build(self, input_shape):
-        # store shape
-        self.H, self.W, self.C = input_shape
+        # store shape, ignore batch size
+        _, self.H, self.W, self.C = input_shape
         # prior on z; we have a z per channel per pixel of x
         # standard normal
-        self.prior_z = tfp.distributions.Normal(np.zeros((self.H, self.W, self.C)), np.ones((self.H, self.W, self.C)))
+        self.prior_z = tfp.distributions.Normal(tf.zeros((self.H, self.W, self.C)), tf.ones((self.H, self.W, self.C)))
         # Model from paper Dinh et al, architecture from course homework handout
         self._layer_group1 = []
         for _ in range(4):
@@ -170,7 +176,6 @@ class RealNVPModel(tf.keras.Model):
     def call(self, inputs, training=None, mask=None):
         z = inputs
         # diagonal jacobian so log det jac is sum of log dets
-        # TODO (note) summing log_det in outputs from affinecouple layers - not sure this is right but shapes don't match o/w
         log_det_jac = 0
         # pass through model, model is grouped in layers by masking pattern with un/squeeze ops
         for layer in self._layer_group1:
@@ -185,8 +190,9 @@ class RealNVPModel(tf.keras.Model):
             z, log_det = layer(z)
             log_det_jac += log_det
         # we use logit trick so have to invert to map to data
-        # TODO (note) is this how we map z and log_det_jac?
-        # TODO: loss nan w/out inv logit trick, but grads 0 with inv logit trick
+        # TODO how we map z and log_det_jac? shouldn't be inv logit here bc then loss won't match
+        #   should it be logit trick here then inv logit in sampling? or just model directly no output activation
+        #   note assignment wants samples in [0, 1] so this is post logit trick
         # z = inverse_logit_trick(z, self.N)
         # log_det_jac = inverse_logit_trick(log_det_jac, self.N)
         return z, log_det_jac
@@ -197,6 +203,8 @@ class RealNVPModel(tf.keras.Model):
         :param zs: bacth of zs (bs, H, W, C)
         :return: xs of shape (bs, H, W, C)
         """
+        if not self.built:
+            raise ValueError("Model not yet built. Please call() model first.")
         # go through layers of forward pass (call()) in reverse calling .inverse()
         x = zs
         for layer in reversed(self._layer_group3):
@@ -214,6 +222,8 @@ class RealNVPModel(tf.keras.Model):
         """
         :return: tfp.distribution, the prior for z (of shape (H, W, C)
         """
+        if not self.built:
+            raise ValueError("Model not yet built. Please call() model first.")
         return self.prior_z
 
 
@@ -236,8 +246,8 @@ class ActNorm(tf.keras.layers.Layer):
 
     def call(self, inputs, **kwargs):
         """
-        :param x: inputs
-        :return: z, log_det
+        :param x: inputs (bs, H, W, C)
+        :return: z (bs, H', W', C'), log_det_jacobian (bs,)
         Where z is the forward pass f(x)
         log_det is the log-determinant of f(x)
         """
@@ -273,6 +283,14 @@ class ActNorm(tf.keras.layers.Layer):
         self._bias = tf.Variable(- mean_t / stddev_t, name="bias", trainable=False)
         # initialised ok
         self.is_initialised = True
+
+    def inverse(self, zs):
+        """
+        Inverse flow x = f^-1(z)
+        :param zs: z inputs (bs, h, w, c)
+        :return: x outputs
+        """
+        return (zs - self._bias) * self._weight
 
 
 class Squeeze(tf.keras.layers.Layer):
@@ -406,8 +424,8 @@ class AffineCoupling(tf.keras.layers.Layer):
 
     def call(self, x, **kwargs):
         """
-        :param x: inputs
-        :return: z, log_det_jacobian
+        :param x: inputs (bs, H, W, C)
+        :return: z (bs, H', W', C'), log_det_jacobian (bs,)
         Where z is the forward pass f(x)
         log_det_jacobian is the log-determinant of f(x)
         """
@@ -419,8 +437,26 @@ class AffineCoupling(tf.keras.layers.Layer):
         t = t * (1.0 - self.mask)
         log_scale = log_scale * (1.0 - self.mask)
         z = x * tf.exp(log_scale) + t
-        log_det_jacobian = log_scale
-        return z, tf.reduce_sum(log_det_jacobian, [1, 2, 3])
+        # Jacobian triangular -> log det jac is sum of diagonals
+        log_det_jacobian = tf.reduce_sum(log_scale)
+        return z, log_det_jacobian
+
+    def inverse(self, zs):
+        """
+        Inverse flow x = f^-1(z)
+        :param zs: z inputs (bs, h, w, c)
+        :return: x outputs
+        """
+        # element wise mask
+        zs_masked = zs * self.mask
+        resnet = self.resnet(zs_masked)
+        log_scale, t = tf.split(resnet, 2, axis=-1)
+        # calculate log_scale, as done in Q1(b)
+        t = t * (1.0 - self.mask)
+        log_scale = log_scale * (1.0 - self.mask)
+        # inverse flow
+        x = (zs - t) * tf.exp(-log_scale)
+        return x
 
 
 class AffineCouplingWithCheckerboard(AffineCoupling):
@@ -483,17 +519,24 @@ def preprocess(data, n, alpha=0.05):
 
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
     np.random.seed(123)
 
-    print(linear_interpolate(0, 4, 3))
+    h, w, c = 6, 6, 3
+    n = 3
+    real_nvp = RealNVP(h, w, c, n)
 
-    # h, w, c = 6, 6, 2
-    # n = 3
-    # real_nvp = RealNVP(h, w, c, n)
-    #
-    # bs = 64
-    # x = np.stack([np.eye(h) * np.random.randint(0, 3, (h,))] * bs * 2).reshape((bs, h, w, c))
-    # x = preprocess(x, n)
-    #
-    # for i in range(5):
-    #     print(real_nvp.train(x))
+    bs = 64
+    x = np.stack([np.eye(h) * np.random.randint(0, 3, (h,))] * bs * c).reshape((bs, h, w, c))
+    x = preprocess(x, n)
+
+    real_nvp.loss(x)
+    sample = real_nvp.sample(1)[0]
+    plt.imshow(sample)
+    plt.show()
+    for i in range(20):
+        # print(real_nvp.train(x))
+        real_nvp.train(x)
+    sample = real_nvp.sample(1)[0]
+    plt.imshow(sample)
+    plt.show()
