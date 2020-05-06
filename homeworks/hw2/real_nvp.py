@@ -114,16 +114,19 @@ class RealNVP:
     def interpolate(self, im1, im2, n):
         """
         Interpolate between two images
-        :param im1: image 1
-        :param im2: image 2
+        :param im1: image 1 (bs, h, w, c)
+        :param im2: image 2 (bs, h, w, c)
         :param n: number of images to interpolate
-        :return: n generated interpolations
+        :return: n generated interpolations for each pair in batch
+        (bs * n, h, w, c)
         """
         # get z values
         z1 = self.f_x(im1)
         z2 = self.f_x(im2)
         # interpolate
         zs = linear_interpolate(z1, z2, n)[1:-1]
+        # interpolate is list, flatten into batch
+        zs = tf.concat(zs, axis=0)
         # generate images
         xs = self.model.inverse(zs)
         return xs
@@ -191,7 +194,8 @@ class RealNVPModel(tf.keras.Model):
             log_det_jac += log_det
         # we use logit trick so have to invert to map to data
         # TODO how we map z and log_det_jac? shouldn't be inv logit here bc then loss won't match
-        #   should it be logit trick here then inv logit in sampling? or just model directly no output activation
+        #   should it be logit trick here then inv logit in sampling?
+        #   or just model directly no output activation
         #   note assignment wants samples in [0, 1] so this is post logit trick
         # z = inverse_logit_trick(z, self.N)
         # log_det_jac = inverse_logit_trick(log_det_jac, self.N)
@@ -524,19 +528,23 @@ if __name__ == "__main__":
 
     h, w, c = 6, 6, 3
     n = 3
-    real_nvp = RealNVP(h, w, c, n)
+    real_nvp = RealNVP(h, w, c, n, lr=5e-3)
 
     bs = 64
     x = np.stack([np.eye(h) * np.random.randint(0, 3, (h,))] * bs * c).reshape((bs, h, w, c))
     x = preprocess(x, n)
 
+    # plt.imshow(np.hstack(x[:10]))
+    # plt.show()
+
     real_nvp.loss(x)
-    sample = real_nvp.sample(1)[0]
+    sample = np.hstack(real_nvp.interpolate(x[:2], x[2:4], n))
     plt.imshow(sample)
     plt.show()
-    for i in range(20):
-        # print(real_nvp.train(x))
-        real_nvp.train(x)
-    sample = real_nvp.sample(1)[0]
+    for i in range(50):
+        loss = real_nvp.train(x)
+        if i % 10 == 0:
+            print(loss)
+    sample = np.hstack(real_nvp.sample(5))
     plt.imshow(sample)
     plt.show()
