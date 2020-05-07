@@ -35,10 +35,10 @@ def linear_interpolate(a, b, n):
     """
     Linearly interpolate between a and b in n steps
     eg. linear_interpolate(0, 4, 3) = [0, 1, 2, 3, 4]
-    :param a: start
-    :param b: stop
+    :param a: start (SHAPE)
+    :param b: stop (SHAPE)
     :param n: number of steps in interpolation (not including end points)
-    :return: n+2 steps from a to b (includes a and b endpoints)
+    :return: n+2 steps from a to b (includes a and b endpoints), (n+2, SHAPE)
     """
     # we want to capture n steps so need n+1 incremements
     n += 1
@@ -117,19 +117,27 @@ class RealNVP:
         :param im1: image 1 (bs, h, w, c)
         :param im2: image 2 (bs, h, w, c)
         :param n: number of images to interpolate
-        :return: n generated interpolations for each pair in batch
-        (bs * n, h, w, c)
+        :return: { start image, n generated interpolations, end image } for each pair in batch
+        (bs * (n+2), h, w, c)
         """
+        im1 = tf.cast(im1, tf.float32)
+        im2 = tf.cast(im2, tf.float32)
+        bs, h, w, c = tf.shape(im1)
         # get z values
         z1 = self.f_x(im1)
         z2 = self.f_x(im2)
-        # interpolate
+        # interpolate, drop end points, (n, bs, h, w, c)
         zs = linear_interpolate(z1, z2, n)[1:-1]
-        # interpolate is list, flatten into batch
-        zs = tf.concat(zs, axis=0)
+        # flatten n interpolations into batch for passing to model.inv()
+        # careful to gather in batches not in interpolations
+        zs = tf.reshape(tf.transpose(zs, (1, 0, 2, 3, 4)), (bs * n, h, w, c))
         # generate images
         xs = self.model.inverse(zs)
-        return xs
+        # add endpoints
+        xs_batches = tf.reshape(xs, (bs, n, h, w, c))
+        xs_endpoints = tf.concat([tf.expand_dims(im1, 1), xs_batches, tf.expand_dims(im2, 1)], axis=1)
+        xs_endpoints = tf.reshape(xs_endpoints, (bs * (n+2), h, w, c))
+        return xs_endpoints
 
     def sample(self, n):
         """
