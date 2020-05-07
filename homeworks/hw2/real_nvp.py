@@ -52,7 +52,6 @@ class RealNVP:
         :param N: number of values each variable (channel of pixel) can take
         :param clip_norm: clip gradient norm before update
         """
-        # TODO (note): work on optimiser schedule
         # warm up 200 steps
         self.optimiser = AdamLRSchedule(lr / 100, lr, 200)
         self.clip_norm = clip_norm
@@ -200,13 +199,6 @@ class RealNVPModel(tf.keras.Model):
         for layer in self._layer_group3:
             z, log_det = layer(z)
             log_det_jac += log_det
-        # we use logit trick so have to invert to map to data
-        # TODO how we map z and log_det_jac? shouldn't be inv logit here bc then loss won't match
-        #   should it be logit trick here then inv logit in sampling?
-        #   or just model directly no output activation
-        #   note assignment wants samples in [0, 1] so this is post logit trick
-        # z = inverse_logit_trick(z, self.N)
-        # log_det_jac = inverse_logit_trick(log_det_jac, self.N)
         return z, log_det_jac
 
     def inverse(self, zs):
@@ -534,25 +526,30 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     np.random.seed(123)
 
+    # TODO: work on nan loss
+    # TODO: debug - get toy example to train
+    # TODO: work on optimiser schedule and/or regularisation
+
     h, w, c = 6, 6, 3
     n = 3
-    real_nvp = RealNVP(h, w, c, n, lr=5e-3)
+    real_nvp = RealNVP(h, w, c, n)
 
     bs = 64
     x = np.stack([np.eye(h) * np.random.randint(0, 3, (h,))] * bs * c).reshape((bs, h, w, c))
     x = preprocess(x, n)
 
-    # plt.imshow(np.hstack(x[:10]))
-    # plt.show()
-
-    real_nvp.loss(x)
-    sample = np.hstack(real_nvp.interpolate(x[:2], x[2:4], n))
-    plt.imshow(sample)
-    plt.show()
-    for i in range(50):
-        loss = real_nvp.train(x)
+    for i in range(40):
+        loss = real_nvp.train(x).numpy()
         if i % 10 == 0:
             print(loss)
-    sample = np.hstack(real_nvp.sample(5))
-    plt.imshow(sample)
+
+    interp = real_nvp.interpolate(x[:2], x[2:4], n).numpy()
+    interp_plot = np.hstack(np.hstack(interp.reshape(2, n+2, h, w, c)))
+    plt.imshow(interp_plot)
+    plt.title("Interp")
+    plt.show()
+
+    sample = real_nvp.sample(8).numpy()
+    plt.imshow(np.hstack(sample))
+    plt.title("Samples")
     plt.show()
