@@ -53,7 +53,7 @@ class RealNVP:
         :param clip_norm: clip gradient norm before update
         """
         # warm up 200 steps
-        self.optimiser = AdamLRSchedule(lr / 100, lr, 200)
+        self.optimiser = AdamLRSchedule(lr / 10, lr, 2)
         self.clip_norm = clip_norm
         self.N = N
         self.n_vars = H * W * C
@@ -167,20 +167,24 @@ class RealNVPModel(tf.keras.Model):
         self.prior_z = tfp.distributions.Normal(tf.zeros((self.H, self.W, self.C)), tf.ones((self.H, self.W, self.C)))
         # Model from paper Dinh et al, architecture from course homework handout
         self._layer_group1 = []
-        for _ in range(4):
-            self._layer_group1.append(AffineCouplingWithCheckerboard(self.n_filters))
+        for i in range(4):
+            # use alternate pattern (inverse mask) on even layers
+            alt_pattern = i % 2 == 0
+            self._layer_group1.append(AffineCouplingWithCheckerboard(self.n_filters, alt_pattern))
             self._layer_group1.append(ActNorm())
         self.squeeze = Squeeze()
 
         self._layer_group2 = []
-        for _ in range(3):
-            self._layer_group2.append(AffineCouplingWithChannel(self.n_filters))
+        for i in range(3):
+            alt_pattern = i % 2 == 0
+            self._layer_group2.append(AffineCouplingWithChannel(self.n_filters, alt_pattern))
             self._layer_group2.append(ActNorm())
         self.unsqueeze = Unsqueeze()
 
         self._layer_group3 = []
-        for _ in range(3):
-            self._layer_group3.append(AffineCouplingWithCheckerboard(self.n_filters))
+        for i in range(3):
+            alt_pattern = i % 2 == 0
+            self._layer_group3.append(AffineCouplingWithCheckerboard(self.n_filters, alt_pattern))
             self._layer_group3.append(ActNorm())
 
     def call(self, inputs, training=None, mask=None):
@@ -404,24 +408,32 @@ class SimpleResnet(tf.keras.layers.Layer):
 
 
 class AffineCoupling(tf.keras.layers.Layer):
-    def __init__(self, n_filters, **kwargs):
+    def __init__(self, n_filters, alt_pattern, **kwargs):
         """
         :param n_filters: number of filers each conv layer
+        :param alt_pattern: if True then masking uses inverse of mask pattern so that each layer alternates
+        which parts are masked.
         """
         super().__init__(**kwargs)
         self.mask = None
         self.n_filters = n_filters
+        self.alt_pattern = alt_pattern
 
     def get_mask(self, input_shape):
         """
-        Overwrite to setup mask
+        Overwrite to setup mask.
+        Don't set to alt pattern, this is done in build.
         :param input_shape: (bs, H, W, C)
         :return: mask (0, 1) of shape (H, W, C)
         """
         raise NotImplementedError
 
     def build(self, input_shape):
-        self.mask = self.get_mask(input_shape)
+        mask = self.get_mask(input_shape)
+        # invert if alt pattern
+        if self.alt_pattern:
+            mask = 1. - mask
+        self.mask = mask
         # want same shape as input, double output size for t and s
         n_out = input_shape[-1]
         self.resnet = SimpleResnet(n_out * 2, self.n_filters)
@@ -455,11 +467,8 @@ class AffineCoupling(tf.keras.layers.Layer):
         zs_masked = zs * self.mask
         resnet = self.resnet(zs_masked)
         log_scale, t = tf.split(resnet, 2, axis=-1)
-        # calculate log_scale, as done in Q1(b)
-        t = t * (1.0 - self.mask)
-        log_scale = log_scale * (1.0 - self.mask)
         # inverse flow
-        x = (zs - t) * tf.exp(-log_scale)
+        x = zs_masked + (1.0 - self.mask) * ((zs - t) * tf.exp(-log_scale))
         return x
 
 
@@ -469,14 +478,17 @@ class AffineCouplingWithCheckerboard(AffineCoupling):
     """
     def get_mask(self, input_shape):
         # checkerboard mask
-        return np.indices(input_shape[1:]).sum(axis=0) % 2
+        checkerboard = np.indices(input_shape[1:3]).sum(axis=0) % 2
+        # stack channels
+        mask = np.stack([checkerboard] * input_shape[-1], 2)
+        return mask
 
 
 class AffineCouplingWithChannel(AffineCoupling):
     def get_mask(self, input_shape):
         mask = np.ones(input_shape[1:])
-        # mask out 1st half channel
-        mask[:, :, :input_shape[-1] // 2] = 0.
+        # mask out last half channel
+        mask[:, :, input_shape[-1] // 2:] = 0.
         return mask
 
 
@@ -526,25 +538,33 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     np.random.seed(123)
 
-    # TODO: work on nan loss
+    # TODO: sort alt masking - gets an output with all masks one way but with alternating
+    #  currently masks full image and nan loss
+    #  couple with channel last layer seems, resnet output seems to get too large so exp overflows
+    # TODO: factor out intermediate layer (half of) outputs see paper 3.6
+    # TODO: work on nan loss - seems ok with low enough LR - is there an issue? Regularisation? LR schedule?
     # TODO: debug - get toy example to train
-    # TODO: work on optimiser schedule and/or regularisation
 
     h, w, c = 6, 6, 3
     n = 3
-    real_nvp = RealNVP(h, w, c, n)
+    real_nvp = RealNVP(h, w, c, n, lr=1e-5)
 
     bs = 64
-    x = np.stack([np.eye(h) * np.random.randint(0, 3, (h,))] * bs * c).reshape((bs, h, w, c))
+    x = np.stack([np.eye(h) * np.random.randint(0, n, (h,))] * bs * c).reshape((bs, h, w, c))
     x = preprocess(x, n)
 
-    for i in range(40):
+    for i in range(150):
         loss = real_nvp.train(x).numpy()
         if i % 10 == 0:
             print(loss)
+            interp = real_nvp.interpolate(x[:2], x[2:4], 4).numpy()
+            interp_plot = np.hstack(np.hstack(interp.reshape(2, 4+2, h, w, c)))
+            plt.imshow(interp_plot)
+            plt.title("Interp")
+            plt.show()
 
-    interp = real_nvp.interpolate(x[:2], x[2:4], n).numpy()
-    interp_plot = np.hstack(np.hstack(interp.reshape(2, n+2, h, w, c)))
+    interp = real_nvp.interpolate(x[:2], x[2:4], 4).numpy()
+    interp_plot = np.hstack(np.hstack(interp.reshape(2, 4+2, h, w, c)))
     plt.imshow(interp_plot)
     plt.title("Interp")
     plt.show()
