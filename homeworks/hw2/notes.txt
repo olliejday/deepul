@@ -1,0 +1,14 @@
+TODO: sort alt masking - gets an output with all masks one way but with alternating
+
+ currently images are black due to nans and infs
+ channel mask last layer resnet output seems to get too large so exp overflows
+ but channel masking seems ok
+ so issue in weights or inputs
+ - could be to do with initialisation or data preprocess
+
+ Looking at the two channel masks separately
+ Checkerboard on it's own seems OK
+
+TODO: work on nan loss - seems ok with low enough LR - is there an issue? Regularisation? LR schedule?
+TODO: factor out intermediate layer (half of) outputs see paper 3.6
+TODO: debug - get toy example to train
