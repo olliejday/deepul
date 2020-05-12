@@ -95,11 +95,13 @@ class RealNVP:
         """
         x = tf.cast(x, tf.float32)
         # forward model and log det term
-        z, log_det_jac = self.model(x)
+        z, log_det = self.model(x)
+        # sum log det for log det jac
+        log_det_jac = tf.reduce_sum(log_det, axis=[1, 2, 3])
         # prior z
-        log_p_z = self.model.get_prior_z().log_prob(z)
+        log_pz = self.model.get_prior_z().log_prob(z)
         # sum over logs is joint
-        log_pz = tf.reduce_sum(log_p_z, axis=[1,2,3])
+        log_pz = tf.reduce_sum(log_pz, axis=[1, 2, 3])
         return log_pz + log_det_jac
 
     def f_x(self, x):
@@ -188,22 +190,26 @@ class RealNVPModel(tf.keras.Model):
             self._layer_group3.append(ActNorm())
 
     def call(self, inputs, training=None, mask=None):
+        """
+        :param inputs:
+        :return: z, log_det
+        """
         z = inputs
         # diagonal jacobian so log det jac is sum of log dets
-        log_det_jac = 0
+        log_det = tf.zeros_like(inputs)
         # pass through model, model is grouped in layers by masking pattern with un/squeeze ops
         for layer in self._layer_group1:
-            z, log_det = layer(z)
-            log_det_jac += log_det
-        z = self.squeeze(z)
+            z, delta_log_det = layer(z)
+            log_det += delta_log_det
+        z, log_det = self.squeeze(z), self.squeeze(log_det)
         for layer in self._layer_group2:
-            z, log_det = layer(z)
-            log_det_jac += log_det
-        z = self.unsqueeze(z)
+            z, delta_log_det = layer(z)
+            log_det += delta_log_det
+        z, log_det = self.unsqueeze(z), self.unsqueeze(log_det)
         for layer in self._layer_group3:
-            z, log_det = layer(z)
-            log_det_jac += log_det
-        return z, log_det_jac
+            z, delta_log_det = layer(z)
+            log_det += delta_log_det
+        return z, log_det
 
     def inverse(self, zs):
         """
@@ -247,8 +253,6 @@ class ActNorm(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # define the parameters, reinititialised in first call (data-dependent)
-        self._weight = self.add_weight("weight", shape=input_shape[1:])
-        self._bias = self.add_weight("bias", shape=input_shape[1:])
         self.H, self.W = input_shape[1:3]
         super().build(input_shape)
 
@@ -269,13 +273,13 @@ class ActNorm(tf.keras.layers.Layer):
         """
         Compute log-det of f(x)
         """
-        return self.H * self.W * tf.reduce_sum(tf.math.log(tf.abs(self._weight)))
+        return self._log_scale
 
     def f_x(self, inputs):
         """
         Compute function of act-norm z = f_x(x)
         """
-        return self._weight * inputs + self._bias
+        return tf.exp(self._log_scale) * inputs + self._bias
 
     def init_kernel(self, inputs):
         """
@@ -283,12 +287,12 @@ class ActNorm(tf.keras.layers.Layer):
         :param inputs: batch of data [bs, H, W, C]
         """
         # get statistics per channel
-        mean_t = tf.reduce_mean(inputs, axis=[0, 1, 2])
-        stddev_t = tf.math.reduce_std(inputs, axis=[0, 1, 2])
+        mean_t = tf.reduce_mean(inputs, axis=[0, 1, 2], keepdims=True)
+        stddev_t = tf.math.reduce_std(inputs, axis=[0, 1, 2], keepdims=True)
         # init weights
-        self._weight = tf.Variable(1. / stddev_t, name="weight", trainable=True)
+        self._log_scale = tf.Variable(-tf.math.log(stddev_t), name="log_scale", trainable=True)
         # bias not trainable, since doesn't appear in log det
-        self._bias = tf.Variable(- mean_t / stddev_t, name="bias", trainable=False)
+        self._bias = tf.Variable(-mean_t, name="bias", trainable=False)
         # initialised ok
         self.is_initialised = True
 
@@ -298,7 +302,7 @@ class ActNorm(tf.keras.layers.Layer):
         :param zs: z inputs (bs, h, w, c)
         :return: x outputs
         """
-        return (zs - self._bias) * self._weight
+        return (zs - self._bias) * tf.exp(self._log_scale)
 
 
 class Squeeze(tf.keras.layers.Layer):
@@ -308,6 +312,7 @@ class Squeeze(tf.keras.layers.Layer):
     """
     def call(self, inputs, **kwargs):
         bs, h, w, c = tf.shape(inputs)
+        # TODO: permute? not sure needed as did test this compared to image in paper
         return tf.reshape(inputs, (bs, h // 2, w // 2, c * 4))
 
 
@@ -338,13 +343,16 @@ class ResnetBlock(tf.keras.layers.Layer):
             x = layer(x)
         return x + inputs
 
+# TODO: try using tfp.WeightNorm
+# def Conv2D(*args, **kwargs):
+#     return tfp.layers.weight_norm.WeightNorm(tf.keras.layers.Conv2D(*args, **kwargs))
+
 
 class Conv2D(tf.keras.layers.Conv2D):
     """
     Overwrite Conv2D with data dependent weight initialisation
     as per Weight Normalisation, Salimans and Kingma, 2016
     """
-
     def __init__(self, *args, seed=123, **kwargs):
         super().__init__(*args, **kwargs)
         # use first call to initialise from data
@@ -367,7 +375,7 @@ class Conv2D(tf.keras.layers.Conv2D):
         v_norm = tf.norm(v)
         # pre activation, not tf uses upper strings for padding
         t = tf.nn.conv2d(inputs, v / v_norm, strides=self.strides, padding=self.padding.upper())
-        # get statistics over filters TODO: this right?
+        # get statistics over filters
         mean_t = tf.reduce_mean(t, axis=[0, 1, 2])
         stddev_t = tf.math.reduce_std(t, axis=[0, 1, 2])
         # params to init weights
@@ -434,6 +442,8 @@ class AffineCoupling(tf.keras.layers.Layer):
         if self.alt_pattern:
             mask = 1. - mask
         self.mask = mask
+        self._scale = self.add_weight(name="scale", shape=(1,))
+        self._scale_shift = self.add_weight(name="scale", shape=(1,))
         # want same shape as input, double output size for t and s
         n_out = input_shape[-1]
         self.resnet = SimpleResnet(n_out * 2, self.n_filters)
@@ -446,15 +456,23 @@ class AffineCoupling(tf.keras.layers.Layer):
         log_det_jacobian is the log-determinant of f(x)
         """
         # element wise mask
-        x_masked = x * self.mask
-        resnet = self.resnet(x_masked)
-        log_scale, t = tf.split(resnet, 2, axis=-1)
-        # calculate log_scale, as done in Q1(b)
-        t = t * (1.0 - self.mask)
-        log_scale = log_scale * (1.0 - self.mask)
+        log_scale, t = self.get_scale_and_shift(x)
         z = x * tf.exp(log_scale) + t
         # Jacobian triangular -> log det jac is sum of diagonals
         log_det_jacobian = tf.reduce_sum(log_scale)
+        # TODO: del for debug
+        def get_stats(a):
+            return (tf.reduce_min(a, [0, 1, 2]).numpy(), tf.reduce_max(a, [0, 1, 2]).numpy())
+        def get_mean_std(a):
+            return (tf.reduce_mean(a, axis=[0, 1, 2]).numpy(), tf.math.reduce_std(a, axis=[0, 1, 2]).numpy())
+        x_mu = get_mean_std(x)
+        x_stats = get_stats(x)
+        zs_mu = get_mean_std(z)
+        zs_stats = get_stats(z)
+        weights_list = [w.numpy() for w in self.trainable_variables]
+        weights_stats = (np.min([np.min(w) for w in weights_list]), np.max([np.min(w) for w in weights_list]),
+                         np.mean([np.min(w) for w in weights_list]), np.std([np.min(w) for w in weights_list]))
+        ###
         return z, log_det_jacobian
 
     def inverse(self, zs):
@@ -464,12 +482,28 @@ class AffineCoupling(tf.keras.layers.Layer):
         :return: x outputs
         """
         # element wise mask
-        zs_masked = zs * self.mask
-        resnet = self.resnet(zs_masked)
-        log_scale, t = tf.split(resnet, 2, axis=-1)
+        log_scale, t = self.get_scale_and_shift(zs)
         # inverse flow
-        x = zs_masked + (1.0 - self.mask) * ((zs - t) * tf.exp(-log_scale))
+        x = (zs - t) * tf.exp(-log_scale)
+        # TODO: del for debug
+        x_mu = tf.reduce_mean(x, axis=[0,1,2])
+        zs_mu = tf.reduce_mean(zs, axis=[0,1,2])
+        ###
         return x
+
+    def get_scale_and_shift(self, x):
+        """
+        Get log_scale and shift, t, by processing outputs of resnet
+        :param x: inputs to resnet, can be Z OR X! (unmasked)
+        :return: log_scale, t
+        """
+        x_mask = x * self.mask
+        resnet = self.resnet(x_mask)
+        log_scale, t = tf.split(resnet, 2, axis=-1)
+        log_scale = self._scale * tf.tanh(log_scale) + self._scale_shift
+        log_scale = log_scale * (1.0 - self.mask)
+        t = t * (1.0 - self.mask)
+        return log_scale, t
 
 
 class AffineCouplingWithCheckerboard(AffineCoupling):
@@ -484,12 +518,114 @@ class AffineCouplingWithCheckerboard(AffineCoupling):
         return mask
 
 
-class AffineCouplingWithChannel(AffineCoupling):
-    def get_mask(self, input_shape):
-        mask = np.ones(input_shape[1:])
-        # mask out last half channel
-        mask[:, :, input_shape[-1] // 2:] = 0.
-        return mask
+# class AffineCouplingWithChannel(AffineCoupling):
+#     # TODO: should mask be all ones and split the inputs to forward instead? does this o/w mean the later channels will be half zeros?
+#     def get_mask(self, input_shape):
+#         mask = np.ones(input_shape[1:])
+#         # mask out last half channel
+#         mask[:, :, input_shape[-1] // 2:] = 0.
+#         return mask
+
+class AffineCouplingWithChannel(tf.keras.layers.Layer):
+    def __init__(self, n_filters, alt_pattern, **kwargs):
+        """
+        :param n_filters: number of filers each conv layer
+        :param alt_pattern: if True then masking uses inverse of mask pattern so that each layer alternates
+        which parts are masked.
+        """
+        super().__init__(**kwargs)
+        self.n_filters = n_filters
+        self.alt_pattern = alt_pattern
+
+    def build(self, input_shape):
+        self._scale = self.add_weight(name="scale", shape=(1,))
+        self._scale_shift = self.add_weight(name="scale", shape=(1,))
+        # double #channels to split into t and s, but we only use 1/2 of channels input so same #channels overall
+        self.n_out = input_shape[-1]
+        self.resnet = SimpleResnet(self.n_out, self.n_filters)
+
+    def call(self, x, **kwargs):
+        """
+        :param x: inputs (bs, H, W, C)
+        :return: z (bs, H', W', C'), log_det_jacobian (bs,)
+        Where z is the forward pass f(x)
+        log_det_jacobian is the log-determinant of f(x)
+        """
+        # element wise mask
+        x_on, x_off = self.apply_mask(x)
+        log_scale, t = self.get_scale_and_shift(x_on)
+        z = x_on * tf.exp(log_scale) + t
+        # Jacobian triangular -> log det jac is sum of diagonals
+        log_det_jacobian = tf.reduce_sum(log_scale)
+        # TODO: del for debug
+        def get_stats(a):
+            return (tf.reduce_min(a, [0, 1, 2]).numpy(), tf.reduce_max(a, [0, 1, 2]).numpy())
+        def get_mean_std(a):
+            return (tf.reduce_mean(a, axis=[0, 1, 2]).numpy(), tf.math.reduce_std(a, axis=[0, 1, 2]).numpy())
+        x_mu = get_mean_std(x)
+        x_stats = get_stats(x)
+        zs_mu = get_mean_std(z)
+        zs_stats = get_stats(z)
+        weights_list = [w.numpy() for w in self.trainable_variables]
+        weights_stats = (np.min([np.min(w) for w in weights_list]), np.max([np.min(w) for w in weights_list]),
+                         np.mean([np.min(w) for w in weights_list]), np.std([np.min(w) for w in weights_list]))
+        ###
+        return self.join_mask(z, x_off), log_det_jacobian
+
+    def inverse(self, zs):
+        """
+        Inverse flow x = f^-1(z)
+        :param zs: z inputs (bs, h, w, c)
+        :return: x outputs
+        """
+        z_on, z_off = self.apply_mask(zs)
+        log_scale, t = self.get_scale_and_shift(z_on)
+        # inverse flow
+        x = (z_on - t) * tf.exp(-log_scale)
+        # TODO: del for debug
+        x_mu = tf.reduce_mean(x, axis=[0,1,2])
+        zs_mu = tf.reduce_mean(zs, axis=[0,1,2])
+        ###
+        return self.join_mask(x, z_off)
+
+    def get_scale_and_shift(self, x_on):
+        """
+        Get log_scale and shift, t, by processing outputs of resnet
+        :param x: inputs to resnet, can be Z OR X! Masked to on channels
+        :return: log_scale, t
+        """
+        resnet = self.resnet(x_on)
+        log_scale, t = tf.split(resnet, 2, axis=-1)
+        log_scale = self._scale * tf.tanh(log_scale) + self._scale_shift
+        return log_scale, t
+
+    def apply_mask(self, x):
+        """
+        Masks input channel wise
+        Either first n/2 are 1s and last 0s or reversed in alt masking
+        :param x: X OR Z, inputs to mask
+        :return: x_on, x_off the masked as 1s and 0s respectively
+        """
+        # TODO: right way round?
+        if self.alt_pattern:
+            x_off, x_on = tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
+            return x_on, x_off
+        else:
+            return tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
+
+    def join_mask(self, ys, x_off):
+        """
+        Joins outputs with the masked off inputs
+        Order depends on masking order
+        Both inputs can be Xs or Zs but in this model should be different
+        :param ys: model outputs
+        :param x_off: data inputs that were masked off, x_off
+        :return: x, joined data and outputs
+        """
+        if self.alt_pattern:
+            return tf.concat([x_off, ys], axis=-1)
+        else:
+            return tf.concat([ys, x_off], axis=-1)
 
 
 def logit_trick(x, n, a=0.05):
@@ -534,20 +670,21 @@ def preprocess(data, n, alpha=0.05):
     return data
 
 
+def squeeze_test(n):
+    # this matches image in paper for n=4
+    # TODO: implement this as squeeze and unsqueeze
+    im = np.arange(1,n**2 + 1).reshape((n//2,n//2,2,2)).transpose((0, 2,1,3)).reshape((n,n,1))
+    squeezed = im.reshape((n//2,2,n//2,2)).transpose((0,2,1,3)).reshape(n//2,n//2,4)
+    print(squeezed[:,:,0])
+
+
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     np.random.seed(123)
 
-    # TODO: sort alt masking - gets an output with all masks one way but with alternating
-    #  currently masks full image and nan loss
-    #  couple with channel last layer seems, resnet output seems to get too large so exp overflows
-    # TODO: factor out intermediate layer (half of) outputs see paper 3.6
-    # TODO: work on nan loss - seems ok with low enough LR - is there an issue? Regularisation? LR schedule?
-    # TODO: debug - get toy example to train
-
     h, w, c = 6, 6, 3
-    n = 3
-    real_nvp = RealNVP(h, w, c, n, lr=1e-5)
+    n = 4
+    real_nvp = RealNVP(h, w, c, n, lr=5e-4)
 
     bs = 64
     x = np.stack([np.eye(h) * np.random.randint(0, n, (h,))] * bs * c).reshape((bs, h, w, c))

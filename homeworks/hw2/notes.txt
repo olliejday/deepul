@@ -6,8 +6,17 @@ TODO: sort alt masking - gets an output with all masks one way but with alternat
  so issue in weights or inputs
  - could be to do with initialisation or data preprocess
 
- Looking at the two channel masks separately
- Checkerboard on it's own seems OK
+ Looking at the two channel masks separately (ie. layer group 1 only or layer group 2 only:
+ Checkerboard on it's own
+    Seems OK with all masks alt, but black outputs and nan loss if alt masks
+    Ok with 2 or 3 alt layers
+    But with 4 alt layers after one or two updates the resnet values blow up and cause issue described
+    Changing resnet doesn't seem to fix, but resnet seems to be issue leading on to overflow
+    - Resnet?
+    - Post-resnet?
+    - Input to resnet?
+
+Looked at solutions here, adding tanh to log_scale outputs helped with nan, still needs work though!
 
 TODO: work on nan loss - seems ok with low enough LR - is there an issue? Regularisation? LR schedule?
 TODO: factor out intermediate layer (half of) outputs see paper 3.6
