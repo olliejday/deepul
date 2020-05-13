@@ -173,7 +173,7 @@ class RealNVPModel(tf.keras.Model):
             # use alternate pattern (inverse mask) on even layers
             alt_pattern = i % 2 == 0
             self._layer_group1.append(AffineCouplingWithCheckerboard(self.n_filters, alt_pattern))
-            self._layer_group1.append(ActNorm())
+            # self._layer_group1.append(ActNorm())
         self.squeeze = Squeeze()
 
         self._layer_group2 = []
@@ -206,9 +206,9 @@ class RealNVPModel(tf.keras.Model):
             z, delta_log_det = layer(z)
             log_det += delta_log_det
         z, log_det = self.unsqueeze(z), self.unsqueeze(log_det)
-        for layer in self._layer_group3:
-            z, delta_log_det = layer(z)
-            log_det += delta_log_det
+        # for layer in self._layer_group3:
+        #     z, delta_log_det = layer(z)
+        #     log_det += delta_log_det
         return z, log_det
 
     def inverse(self, zs):
@@ -221,8 +221,8 @@ class RealNVPModel(tf.keras.Model):
             raise ValueError("Model not yet built. Please call() model first.")
         # go through layers of forward pass (call()) in reverse calling .inverse()
         x = zs
-        for layer in reversed(self._layer_group3):
-            x = layer.inverse(x)
+        # for layer in reversed(self._layer_group3):
+        #     x = layer.inverse(x)
         # swap squeeze and unsqueeze
         x = self.squeeze(x)
         for layer in reversed(self._layer_group2):
@@ -619,10 +619,10 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         """
         # TODO: right way round? - pretty sure masking is right way now
         if self.alt_pattern:
-            return tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
-        else:
             x_off, x_on = tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
             return x_on, x_off
+        else:
+            return tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
 
     def join_mask(self, ys, x_off):
         """
@@ -634,9 +634,9 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         :return: x, joined data and outputs
         """
         if self.alt_pattern:
-            return tf.concat([ys, x_off], axis=-1)
-        else:
             return tf.concat([x_off, ys], axis=-1)
+        else:
+            return tf.concat([ys, x_off], axis=-1)
 
 
 def logit_trick(x, n, a=0.05):
@@ -720,8 +720,7 @@ if __name__ == "__main__":
         loss = real_nvp.train(x).numpy()
         if i % 10 == 0:
             print(loss)
-            interp = real_nvp.interpolate(x[:2], x[2:4], 4)
-            interp = inverse_logit_trick(interp, n).numpy()
+            interp = real_nvp.interpolate(x[:2], x[2:4], 4).numpy()
             interp_plot = np.hstack(np.hstack(interp.reshape(2, 4 + 2, h, w, c)))
             plt.imshow(interp_plot)
             plt.title("Interp")

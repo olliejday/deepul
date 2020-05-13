@@ -18,6 +18,11 @@ TODO: sort alt masking - gets an output with all masks one way but with alternat
 
 Looked at solutions here, adding tanh to log_scale outputs helped with nan, still needs work though!
 
+layer group 1 on its own works on debug dataset now
+layer group 2 on its own works on debug dataset now
+
+So merging them is an issue, swapped ordering of masking on channel and now seems to work :)
+
 TODO: work on nan loss - seems ok with low enough LR - is there an issue? Regularisation? LR schedule?
 TODO: factor out intermediate layer (half of) outputs see paper 3.6
 TODO: debug - get toy example to train
