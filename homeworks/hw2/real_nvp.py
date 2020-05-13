@@ -14,7 +14,7 @@ class AdamLRSchedule:
         """
         self.n_steps = n_steps
         # n_steps-2 bc the learning rate steps include endpoints as steps whereas lin_interp() does not
-        self.lrs = linear_interpolate(start_lr, end_lr, n_steps-2)
+        self.lrs = linear_interpolate(start_lr, end_lr, n_steps - 2)
         # init optimiser and step count
         self.optimiser = None
         self.step = 0
@@ -42,7 +42,7 @@ def linear_interpolate(a, b, n):
     """
     # we want to capture n steps so need n+1 incremements
     n += 1
-    return [a + (b - a) * (i / n) for i in range(n+1)]
+    return [a + (b - a) * (i / n) for i in range(n + 1)]
 
 
 class RealNVP:
@@ -137,7 +137,7 @@ class RealNVP:
         # add endpoints
         xs_batches = tf.reshape(xs, (bs, n, h, w, c))
         xs_endpoints = tf.concat([tf.expand_dims(im1, 1), xs_batches, tf.expand_dims(im2, 1)], axis=1)
-        xs_endpoints = tf.reshape(xs_endpoints, (bs * (n+2), h, w, c))
+        xs_endpoints = tf.reshape(xs_endpoints, (bs * (n + 2), h, w, c))
         return xs_endpoints
 
     def sample(self, n):
@@ -307,22 +307,27 @@ class ActNorm(tf.keras.layers.Layer):
 
 class Squeeze(tf.keras.layers.Layer):
     """
-    Reshape to channels
+    Squeeze - reshape to channels by dividing into 2 x 2 x c sub squares and then flattening each to 1 x 1 x 4c
     [b, h, w, c] --> [b, h//2, w//2, c*4]
     """
+
     def call(self, inputs, **kwargs):
         bs, h, w, c = tf.shape(inputs)
         # TODO: permute? not sure needed as did test this compared to image in paper
-        return tf.reshape(inputs, (bs, h // 2, w // 2, c * 4))
+        inputs_sub_sq = tf.reshape(inputs, (bs, h // 2, 2, w // 2, 2, c))
+        return tf.reshape(tf.transpose(inputs_sub_sq, (0, 1, 3, 5, 2, 4)), (bs, h // 2, w // 2, 4 * c))
 
 
 class Unsqueeze(tf.keras.layers.Layer):
     """
+    Reverse of Squeeze()
     [b, h//2, w//2, c*4] --> [b, h, w, c]
     """
+
     def call(self, inputs, **kwargs):
         bs, h, w, c = tf.shape(inputs)
-        return tf.reshape(inputs, (bs, h * 2, w * 2, c // 4))
+        inputs_sub_sq = tf.reshape(tf.transpose(inputs, (0, 3, 1, 2)), (bs, c // 4, 2, 2, h, w))
+        return tf.reshape(tf.transpose(inputs_sub_sq, (0, 4, 2, 5, 3, 1)), (bs, h * 2, w * 2, c // 4))
 
 
 class ResnetBlock(tf.keras.layers.Layer):
@@ -334,14 +339,15 @@ class ResnetBlock(tf.keras.layers.Layer):
         self._layers = []
         # TODO (Note): pseudocode had in and out as padding=0 and middle as padding=1
         self._layers.append(Conv2D(self.n_filters, (1, 1), activation="relu", strides=1, padding="VALID"))
-        self._layers.append(Conv2D(self.n_filters, (3, 3), activation="relu",  strides=1, padding="SAME"))
-        self._layers.append(Conv2D(self.n_filters, (1, 1), activation="relu",  strides=1, padding="VALID"))
+        self._layers.append(Conv2D(self.n_filters, (3, 3), activation="relu", strides=1, padding="SAME"))
+        self._layers.append(Conv2D(self.n_filters, (1, 1), activation="relu", strides=1, padding="VALID"))
 
     def call(self, inputs, **kwargs):
         x = inputs
         for layer in self._layers:
             x = layer(x)
         return x + inputs
+
 
 # TODO: try using tfp.WeightNorm
 # def Conv2D(*args, **kwargs):
@@ -353,6 +359,7 @@ class Conv2D(tf.keras.layers.Conv2D):
     Overwrite Conv2D with data dependent weight initialisation
     as per Weight Normalisation, Salimans and Kingma, 2016
     """
+
     def __init__(self, *args, seed=123, **kwargs):
         super().__init__(*args, **kwargs)
         # use first call to initialise from data
@@ -460,11 +467,14 @@ class AffineCoupling(tf.keras.layers.Layer):
         z = x * tf.exp(log_scale) + t
         # Jacobian triangular -> log det jac is sum of diagonals
         log_det_jacobian = tf.reduce_sum(log_scale)
+
         # TODO: del for debug
         def get_stats(a):
             return (tf.reduce_min(a, [0, 1, 2]).numpy(), tf.reduce_max(a, [0, 1, 2]).numpy())
+
         def get_mean_std(a):
             return (tf.reduce_mean(a, axis=[0, 1, 2]).numpy(), tf.math.reduce_std(a, axis=[0, 1, 2]).numpy())
+
         x_mu = get_mean_std(x)
         x_stats = get_stats(x)
         zs_mu = get_mean_std(z)
@@ -486,8 +496,8 @@ class AffineCoupling(tf.keras.layers.Layer):
         # inverse flow
         x = (zs - t) * tf.exp(-log_scale)
         # TODO: del for debug
-        x_mu = tf.reduce_mean(x, axis=[0,1,2])
-        zs_mu = tf.reduce_mean(zs, axis=[0,1,2])
+        x_mu = tf.reduce_mean(x, axis=[0, 1, 2])
+        zs_mu = tf.reduce_mean(zs, axis=[0, 1, 2])
         ###
         return x
 
@@ -510,6 +520,7 @@ class AffineCouplingWithCheckerboard(AffineCoupling):
     """
     Figure 3 in Dinh et al - (left)
     """
+
     def get_mask(self, input_shape):
         # checkerboard mask
         checkerboard = np.indices(input_shape[1:3]).sum(axis=0) % 2
@@ -557,11 +568,14 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         z = x_on * tf.exp(log_scale) + t
         # Jacobian triangular -> log det jac is sum of diagonals
         log_det_jacobian = tf.reduce_sum(log_scale)
+
         # TODO: del for debug
         def get_stats(a):
             return (tf.reduce_min(a, [0, 1, 2]).numpy(), tf.reduce_max(a, [0, 1, 2]).numpy())
+
         def get_mean_std(a):
             return (tf.reduce_mean(a, axis=[0, 1, 2]).numpy(), tf.math.reduce_std(a, axis=[0, 1, 2]).numpy())
+
         x_mu = get_mean_std(x)
         x_stats = get_stats(x)
         zs_mu = get_mean_std(z)
@@ -583,8 +597,8 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         # inverse flow
         x = (z_on - t) * tf.exp(-log_scale)
         # TODO: del for debug
-        x_mu = tf.reduce_mean(x, axis=[0,1,2])
-        zs_mu = tf.reduce_mean(zs, axis=[0,1,2])
+        x_mu = tf.reduce_mean(x, axis=[0, 1, 2])
+        zs_mu = tf.reduce_mean(zs, axis=[0, 1, 2])
         ###
         return self.join_mask(x, z_off)
 
@@ -670,16 +684,31 @@ def preprocess(data, n, alpha=0.05):
     return data
 
 
-def squeeze_test(n):
+def squeeze_test(n, bs, c):
+    """
+    :param n: n x n images
+    :param bs: batch size
+    :param c: # channels
+    """
     # this matches image in paper for n=4
     # TODO: implement this as squeeze and unsqueeze
-    im = np.arange(1,n**2 + 1).reshape((n//2,n//2,2,2)).transpose((0, 2,1,3)).reshape((n,n,1))
-    squeezed = im.reshape((n//2,2,n//2,2)).transpose((0,2,1,3)).reshape(n//2,n//2,4)
-    print(squeezed[:,:,0])
+    im = np.arange(1, bs * c * (n ** 2) + 1).reshape((bs,c, n // 2, n // 2, 2, 2)).transpose((0,1,2,4,3,5)).reshape((bs,c,n,n)).transpose((0,2,3,1))
+    # TODO: transpose (0,1,3, 5,2,4) so s1c1 s2c1 s3c1 s4c1 s2c1 ... ie. subsquares first - this matches ucb solutions - WHY?
+    #   or (0, 1, 3, 2, 4, 5) so s1c1 s1c2 s1c3 s2c1 s2c2 .... ie. channels first - I think channels first
+    #   because you want to flatten by pixel and so mask channels to mask pixels not infact channels
+    squeezed = im.reshape((bs, n // 2, 2, n // 2, 2, c)).transpose((0, 1, 3, 5, 2, 4)).reshape((bs, n // 2, n // 2, 4*c))
+    for i in range(6):
+        print(squeezed[0, :, :, i])
+    # use reference of squeezed shape
+    _, n_sq, n_sq, c_sq = np.shape(squeezed)
+    unsqueezed = squeezed.transpose((0,3,1,2)).reshape((bs, c_sq // 4, 2, 2, n_sq, n_sq)).transpose((0,4,2,5,3,1)).reshape((bs,n_sq*2,n_sq*2, c_sq//4))
+    print(unsqueezed[0, :, :, 0])
+    print(np.allclose(im, unsqueezed))
 
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
+
     np.random.seed(123)
 
     h, w, c = 6, 6, 3
@@ -695,13 +724,13 @@ if __name__ == "__main__":
         if i % 10 == 0:
             print(loss)
             interp = real_nvp.interpolate(x[:2], x[2:4], 4).numpy()
-            interp_plot = np.hstack(np.hstack(interp.reshape(2, 4+2, h, w, c)))
+            interp_plot = np.hstack(np.hstack(interp.reshape(2, 4 + 2, h, w, c)))
             plt.imshow(interp_plot)
             plt.title("Interp")
             plt.show()
 
     interp = real_nvp.interpolate(x[:2], x[2:4], 4).numpy()
-    interp_plot = np.hstack(np.hstack(interp.reshape(2, 4+2, h, w, c)))
+    interp_plot = np.hstack(np.hstack(interp.reshape(2, 4 + 2, h, w, c)))
     plt.imshow(interp_plot)
     plt.title("Interp")
     plt.show()
