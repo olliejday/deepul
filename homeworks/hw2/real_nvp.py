@@ -313,7 +313,7 @@ class Squeeze(tf.keras.layers.Layer):
 
     def call(self, inputs, **kwargs):
         bs, h, w, c = tf.shape(inputs)
-        # TODO: permute? not sure needed as did test this compared to image in paper
+        # TODO: simplify un/squeeze?
         inputs_sub_sq = tf.reshape(inputs, (bs, h // 2, 2, w // 2, 2, c))
         return tf.reshape(tf.transpose(inputs_sub_sq, (0, 1, 3, 5, 2, 4)), (bs, h // 2, w // 2, 4 * c))
 
@@ -350,11 +350,11 @@ class ResnetBlock(tf.keras.layers.Layer):
 
 
 # TODO: try using tfp.WeightNorm
-# def Conv2D(*args, **kwargs):
-#     return tfp.layers.weight_norm.WeightNorm(tf.keras.layers.Conv2D(*args, **kwargs))
+def Conv2D(*args, **kwargs):
+    return tfp.layers.weight_norm.WeightNorm(tf.keras.layers.Conv2D(*args, **kwargs))
 
 
-class Conv2D(tf.keras.layers.Conv2D):
+class Conv2D1(tf.keras.layers.Conv2D):
     """
     Overwrite Conv2D with data dependent weight initialisation
     as per Weight Normalisation, Salimans and Kingma, 2016
@@ -465,8 +465,6 @@ class AffineCoupling(tf.keras.layers.Layer):
         # element wise mask
         log_scale, t = self.get_scale_and_shift(x)
         z = x * tf.exp(log_scale) + t
-        # Jacobian triangular -> log det jac is sum of diagonals
-        log_det_jacobian = tf.reduce_sum(log_scale)
 
         # TODO: del for debug
         def get_stats(a):
@@ -483,7 +481,7 @@ class AffineCoupling(tf.keras.layers.Layer):
         weights_stats = (np.min([np.min(w) for w in weights_list]), np.max([np.min(w) for w in weights_list]),
                          np.mean([np.min(w) for w in weights_list]), np.std([np.min(w) for w in weights_list]))
         ###
-        return z, log_det_jacobian
+        return z, log_scale
 
     def inverse(self, zs):
         """
@@ -523,7 +521,8 @@ class AffineCouplingWithCheckerboard(AffineCoupling):
 
     def get_mask(self, input_shape):
         # checkerboard mask
-        checkerboard = np.indices(input_shape[1:3]).sum(axis=0) % 2
+        # we want main mask here, top left corner = 1
+        checkerboard = 1. - np.indices(input_shape[1:3]).sum(axis=0) % 2
         # stack channels
         mask = np.stack([checkerboard] * input_shape[-1], 2)
         return mask
@@ -564,10 +563,8 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         """
         # element wise mask
         x_on, x_off = self.apply_mask(x)
-        log_scale, t = self.get_scale_and_shift(x_on)
+        log_scale, t = self.get_scale_and_shift(x_off)
         z = x_on * tf.exp(log_scale) + t
-        # Jacobian triangular -> log det jac is sum of diagonals
-        log_det_jacobian = tf.reduce_sum(log_scale)
 
         # TODO: del for debug
         def get_stats(a):
@@ -584,7 +581,7 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         weights_stats = (np.min([np.min(w) for w in weights_list]), np.max([np.min(w) for w in weights_list]),
                          np.mean([np.min(w) for w in weights_list]), np.std([np.min(w) for w in weights_list]))
         ###
-        return self.join_mask(z, x_off), log_det_jacobian
+        return self.join_mask(z, x_off), tf.concat([log_scale, tf.zeros_like(log_scale)], axis=-1)
 
     def inverse(self, zs):
         """
@@ -593,7 +590,7 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         :return: x outputs
         """
         z_on, z_off = self.apply_mask(zs)
-        log_scale, t = self.get_scale_and_shift(z_on)
+        log_scale, t = self.get_scale_and_shift(z_off)
         # inverse flow
         x = (z_on - t) * tf.exp(-log_scale)
         # TODO: del for debug
@@ -620,12 +617,12 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         :param x: X OR Z, inputs to mask
         :return: x_on, x_off the masked as 1s and 0s respectively
         """
-        # TODO: right way round?
+        # TODO: right way round? - pretty sure masking is right way now
         if self.alt_pattern:
+            return tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
+        else:
             x_off, x_on = tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
             return x_on, x_off
-        else:
-            return tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
 
     def join_mask(self, ys, x_off):
         """
@@ -637,9 +634,9 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         :return: x, joined data and outputs
         """
         if self.alt_pattern:
-            return tf.concat([x_off, ys], axis=-1)
-        else:
             return tf.concat([ys, x_off], axis=-1)
+        else:
+            return tf.concat([x_off, ys], axis=-1)
 
 
 def logit_trick(x, n, a=0.05):
@@ -713,7 +710,7 @@ if __name__ == "__main__":
 
     h, w, c = 6, 6, 3
     n = 4
-    real_nvp = RealNVP(h, w, c, n, lr=5e-4)
+    real_nvp = RealNVP(h, w, c, n, lr=5e-3)
 
     bs = 64
     x = np.stack([np.eye(h) * np.random.randint(0, n, (h,))] * bs * c).reshape((bs, h, w, c))
@@ -723,7 +720,8 @@ if __name__ == "__main__":
         loss = real_nvp.train(x).numpy()
         if i % 10 == 0:
             print(loss)
-            interp = real_nvp.interpolate(x[:2], x[2:4], 4).numpy()
+            interp = real_nvp.interpolate(x[:2], x[2:4], 4)
+            interp = inverse_logit_trick(interp, n).numpy()
             interp_plot = np.hstack(np.hstack(interp.reshape(2, 4 + 2, h, w, c)))
             plt.imshow(interp_plot)
             plt.title("Interp")
