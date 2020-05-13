@@ -185,6 +185,7 @@ class RealNVPModel(tf.keras.Model):
 
         self._layer_group3 = []
         for i in range(3):
+            # TODO: reverse order since have odd number in layer group 2
             alt_pattern = i % 2 == 0
             self._layer_group3.append(AffineCouplingWithCheckerboard(self.n_filters, alt_pattern))
             self._layer_group3.append(ActNorm())
@@ -202,13 +203,13 @@ class RealNVPModel(tf.keras.Model):
             z, delta_log_det = layer(z)
             log_det += delta_log_det
         z, log_det = self.squeeze(z), self.squeeze(log_det)
-        for layer in self._layer_group2:
-            z, delta_log_det = layer(z)
-            log_det += delta_log_det
-        z, log_det = self.unsqueeze(z), self.unsqueeze(log_det)
-        # for layer in self._layer_group3:
+        # for layer in self._layer_group2:
         #     z, delta_log_det = layer(z)
         #     log_det += delta_log_det
+        z, log_det = self.unsqueeze(z), self.unsqueeze(log_det)
+        for layer in self._layer_group3:
+            z, delta_log_det = layer(z)
+            log_det += delta_log_det
         return z, log_det
 
     def inverse(self, zs):
@@ -221,12 +222,12 @@ class RealNVPModel(tf.keras.Model):
             raise ValueError("Model not yet built. Please call() model first.")
         # go through layers of forward pass (call()) in reverse calling .inverse()
         x = zs
-        # for layer in reversed(self._layer_group3):
-        #     x = layer.inverse(x)
-        # swap squeeze and unsqueeze
-        x = self.squeeze(x)
-        for layer in reversed(self._layer_group2):
+        for layer in reversed(self._layer_group3):
             x = layer.inverse(x)
+        # # swap squeeze and unsqueeze
+        x = self.squeeze(x)
+        # for layer in reversed(self._layer_group2):
+        #     x = layer.inverse(x)
         x = self.unsqueeze(x)
         for layer in reversed(self._layer_group1):
             x = layer.inverse(x)
@@ -540,8 +541,7 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
     def __init__(self, n_filters, alt_pattern, **kwargs):
         """
         :param n_filters: number of filers each conv layer
-        :param alt_pattern: if True then masking uses inverse of mask pattern so that each layer alternates
-        which parts are masked.
+        :param alt_pattern: if True then masks later channels o/w masks first channels
         """
         super().__init__(**kwargs)
         self.n_filters = n_filters
@@ -581,7 +581,7 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         weights_stats = (np.min([np.min(w) for w in weights_list]), np.max([np.min(w) for w in weights_list]),
                          np.mean([np.min(w) for w in weights_list]), np.std([np.min(w) for w in weights_list]))
         ###
-        return self.join_mask(z, x_off), tf.concat([log_scale, tf.zeros_like(log_scale)], axis=-1)
+        return self.join_mask(z, x_off), self.join_mask(log_scale, tf.zeros_like(log_scale))
 
     def inverse(self, zs):
         """
@@ -624,19 +624,19 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         else:
             return tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
 
-    def join_mask(self, ys, x_off):
+    def join_mask(self, x_on, x_off):
         """
         Joins outputs with the masked off inputs
         Order depends on masking order
         Both inputs can be Xs or Zs but in this model should be different
-        :param ys: model outputs
-        :param x_off: data inputs that were masked off, x_off
+        :param x_on: model outputs or pixels to replace x_on in masking (1)
+        :param x_off: data inputs that were masked off, x_off in masking (0)
         :return: x, joined data and outputs
         """
         if self.alt_pattern:
-            return tf.concat([x_off, ys], axis=-1)
+            return tf.concat([x_off, x_on], axis=-1)
         else:
-            return tf.concat([ys, x_off], axis=-1)
+            return tf.concat([x_on, x_off], axis=-1)
 
 
 def logit_trick(x, n, a=0.05):
