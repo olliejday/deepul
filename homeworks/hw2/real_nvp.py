@@ -173,22 +173,26 @@ class RealNVPModel(tf.keras.Model):
             # use alternate pattern (inverse mask) on even layers
             alt_pattern = i % 2 == 0
             self._layer_group1.append(AffineCouplingWithCheckerboard(self.n_filters, alt_pattern))
-            # self._layer_group1.append(ActNorm())
+            # no act norm last layer
+            if i < 3:
+                self._layer_group1.append(ActNorm())
         self.squeeze = Squeeze()
 
         self._layer_group2 = []
         for i in range(3):
             alt_pattern = i % 2 == 0
             self._layer_group2.append(AffineCouplingWithChannel(self.n_filters, alt_pattern))
-            self._layer_group2.append(ActNorm())
+            if i < 2:
+                self._layer_group2.append(ActNorm())
         self.unsqueeze = Unsqueeze()
 
         self._layer_group3 = []
         for i in range(3):
             # TODO: reverse order since have odd number in layer group 2
-            alt_pattern = i % 2 == 0
+            alt_pattern = i % 2 != 0
             self._layer_group3.append(AffineCouplingWithCheckerboard(self.n_filters, alt_pattern))
-            self._layer_group3.append(ActNorm())
+            if i < 2:
+                self._layer_group3.append(ActNorm())
 
     def call(self, inputs, training=None, mask=None):
         """
@@ -690,21 +694,30 @@ def squeeze_test(n, bs, c):
     # this matches image in paper for n=4
     # TODO: implement this as squeeze and unsqueeze
     im = np.arange(1, bs * c * (n ** 2) + 1).reshape((bs,c, n // 2, n // 2, 2, 2)).transpose((0,1,2,4,3,5)).reshape((bs,c,n,n)).transpose((0,2,3,1))
-    # TODO: transpose (0,1,3, 5,2,4) so s1c1 s2c1 s3c1 s4c1 s2c1 ... ie. subsquares first - this matches ucb solutions - WHY?
-    #   or (0, 1, 3, 2, 4, 5) so s1c1 s1c2 s1c3 s2c1 s2c2 .... ie. channels first - I think channels first
+    # TODO: transpose on un/squeeze
+    #  type 1 (0,1,3, 5,2,4) so s1c1 s2c1 s3c1 s4c1 s1c2 ... ie. subsquares first - this matches ucb solutions - WHY?
+    #  type 2(0, 1, 3, 2, 4, 5) so s1c1 s1c2 s1c3 s2c1 s2c2 .... ie. channels first - I think channels first
     #   because you want to flatten by pixel and so mask channels to mask pixels not infact channels
-    squeezed = im.reshape((bs, n // 2, 2, n // 2, 2, c)).transpose((0, 1, 3, 5, 2, 4)).reshape((bs, n // 2, n // 2, 4*c))
+    # type 2
+    squeezed = im.reshape((bs, n // 2, 2, n // 2, 2, c)).transpose((0, 1, 3, 2, 4, 5) ).reshape((bs, n // 2, n // 2, 4*c))
+    # type 1
+    # squeezed = im.reshape((bs, n // 2, 2, n // 2, 2, c)).transpose((0, 1, 3, 5, 2, 4)).reshape((bs, n // 2, n // 2, 4*c))
     for i in range(6):
         print(squeezed[0, :, :, i])
     # use reference of squeezed shape
     _, n_sq, n_sq, c_sq = np.shape(squeezed)
-    unsqueezed = squeezed.transpose((0,3,1,2)).reshape((bs, c_sq // 4, 2, 2, n_sq, n_sq)).transpose((0,4,2,5,3,1)).reshape((bs,n_sq*2,n_sq*2, c_sq//4))
+    # type 2
+    unsqueezed = squeezed.reshape((bs, n // 2, n // 2, 2, 2, c)).transpose((0, 1, 3, 2, 4, 5)).reshape(bs, n, n, c)
+    # type 1
+    # unsqueezed = squeezed.transpose((0,3,1,2)).reshape((bs, c_sq // 4, 2, 2, n_sq, n_sq)).transpose((0,1,2,5,3,4)).reshape((bs,n_sq*2,n_sq*2, c_sq//4))
     print(unsqueezed[0, :, :, 0])
     print(np.allclose(im, unsqueezed))
 
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
+
+    squeeze_test(6, 7, 3)
 
     np.random.seed(123)
 

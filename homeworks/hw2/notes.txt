@@ -24,9 +24,10 @@ layer group 2 on its own works on debug dataset now
 So merging them is an issue! Doesn't work as well as layer group 1 on own though does get some of the way
 Doesn't work with merged (all 3 layer groups) on celeb faces
 
+Layer 1 and layer 3 seems to work
 Doesn't work layer 1 squeeze + un and layer 3
 
-* Look at squeeze / unsqueeze - try old squeeze way?
+* Look at squeeze / unsqueeze on both z and log_det - try old squeeze way?
 
 TODO: work on nan loss - seems ok with low enough LR - is there an issue? Regularisation? LR schedule?
 TODO: factor out intermediate layer (half of) outputs see paper 3.6
