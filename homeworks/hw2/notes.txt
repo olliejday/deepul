@@ -26,8 +26,9 @@ Doesn't work with merged (all 3 layer groups) on celeb faces
 
 Layer 1 and layer 3 seems to work
 Doesn't work layer 1 squeeze + un and layer 3
+For layer 1 + layer 3 both un/squeeze type 1 and 2 don't work
 
-* Look at squeeze / unsqueeze on both z and log_det - try old squeeze way?
+* Look at squeeze / unsqueeze
 
 TODO: work on nan loss - seems ok with low enough LR - is there an issue? Regularisation? LR schedule?
 TODO: factor out intermediate layer (half of) outputs see paper 3.6

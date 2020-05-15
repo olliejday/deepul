@@ -188,7 +188,7 @@ class RealNVPModel(tf.keras.Model):
 
         self._layer_group3 = []
         for i in range(3):
-            # TODO: reverse order since have odd number in layer group 2
+            # reverse order since have odd number in layer group 2
             alt_pattern = i % 2 != 0
             self._layer_group3.append(AffineCouplingWithCheckerboard(self.n_filters, alt_pattern))
             if i < 2:
@@ -225,10 +225,10 @@ class RealNVPModel(tf.keras.Model):
         if not self.built:
             raise ValueError("Model not yet built. Please call() model first.")
         # go through layers of forward pass (call()) in reverse calling .inverse()
+        # swap squeeze and unsqueeze
         x = zs
         for layer in reversed(self._layer_group3):
             x = layer.inverse(x)
-        # # swap squeeze and unsqueeze
         x = self.squeeze(x)
         # for layer in reversed(self._layer_group2):
         #     x = layer.inverse(x)
@@ -692,9 +692,7 @@ def squeeze_test(n, bs, c):
     :param c: # channels
     """
     # this matches image in paper for n=4
-    # TODO: implement this as squeeze and unsqueeze
     im = np.arange(1, bs * c * (n ** 2) + 1).reshape((bs,c, n // 2, n // 2, 2, 2)).transpose((0,1,2,4,3,5)).reshape((bs,c,n,n)).transpose((0,2,3,1))
-    # TODO: transpose on un/squeeze
     #  type 1 (0,1,3, 5,2,4) so s1c1 s2c1 s3c1 s4c1 s1c2 ... ie. subsquares first - this matches ucb solutions - WHY?
     #  type 2(0, 1, 3, 2, 4, 5) so s1c1 s1c2 s1c3 s2c1 s2c2 .... ie. channels first - I think channels first
     #   because you want to flatten by pixel and so mask channels to mask pixels not infact channels
@@ -707,7 +705,7 @@ def squeeze_test(n, bs, c):
     # use reference of squeezed shape
     _, n_sq, n_sq, c_sq = np.shape(squeezed)
     # type 2
-    unsqueezed = squeezed.reshape((bs, n // 2, n // 2, 2, 2, c)).transpose((0, 1, 3, 2, 4, 5)).reshape(bs, n, n, c)
+    unsqueezed = squeezed.reshape((bs, n_sq, n_sq, 2, 2, c_sq//4)).transpose((0, 1, 3, 2, 4, 5)).reshape(bs, n_sq*2, n_sq*2, c_sq//4)
     # type 1
     # unsqueezed = squeezed.transpose((0,3,1,2)).reshape((bs, c_sq // 4, 2, 2, n_sq, n_sq)).transpose((0,1,2,5,3,4)).reshape((bs,n_sq*2,n_sq*2, c_sq//4))
     print(unsqueezed[0, :, :, 0])
@@ -716,8 +714,6 @@ def squeeze_test(n, bs, c):
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-
-    squeeze_test(6, 7, 3)
 
     np.random.seed(123)
 
