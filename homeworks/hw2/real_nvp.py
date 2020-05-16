@@ -56,16 +56,18 @@ class RealNVP:
         self.optimiser = AdamLRSchedule(lr / 10, lr, 2)
         self.clip_norm = clip_norm
         self.N = N
+        self.H, self.W, self.C = H, W, C
         self.n_vars = H * W * C
         self.model = self.setup_model()
 
-    def train(self, x):
+    def train(self, x, log_det_x):
         """
+        x, log_det_x the inputs and the log_det to account for preprocessing
         Run training step
         Returns loss for batch (1,)
         """
         with tf.GradientTape() as tape:
-            loss = self.loss(x)
+            loss = self.loss(x, log_det_x)
         grads = tape.gradient(loss, self.model.trainable_variables)
         grads, _ = tf.clip_by_global_norm(grads, self.clip_norm)
         # get the optimiser for this step
@@ -77,7 +79,7 @@ class RealNVP:
     def setup_model(self):
         return RealNVPModel(self.N)
 
-    def loss(self, x):
+    def loss(self, x, log_det_x):
         """
         Returns negative log prob for batch (1,) in nats / dim
         We scale (in logs) based on preprocessing (scale_loss)
@@ -86,7 +88,7 @@ class RealNVP:
         log_p_x = self.log_p_x(x)
         # log_p_x is (bs,) summed over vars so need to get mean over number of vars for nats / dim
         # scale (in log space) to account for preprocessing scaling
-        return - tf.reduce_mean(log_p_x) / self.n_vars
+        return - tf.reduce_mean(log_p_x + log_det_x) / self.n_vars
 
     def log_p_x(self, x):
         """
@@ -147,7 +149,7 @@ class RealNVP:
         :return: n samples
         """
         # get zs
-        zs = self.model.get_prior_z().sample(n)
+        zs = self.model.get_prior_z().sample((n, self.H, self.W, self.C))
         # generate images
         xs = self.model.inverse(zs)
         return xs
@@ -166,7 +168,7 @@ class RealNVPModel(tf.keras.Model):
         _, self.H, self.W, self.C = input_shape
         # prior on z; we have a z per channel per pixel of x
         # standard normal
-        self.prior_z = tfp.distributions.Normal(tf.zeros((self.H, self.W, self.C)), tf.ones((self.H, self.W, self.C)))
+        self.prior_z = tfp.distributions.Normal(0., 1.)
         # Model from paper Dinh et al, architecture from course homework handout
         self._layer_group1 = []
         for i in range(4):
@@ -188,8 +190,7 @@ class RealNVPModel(tf.keras.Model):
 
         self._layer_group3 = []
         for i in range(3):
-            # reverse order since have odd number in layer group 2
-            alt_pattern = i % 2 != 0
+            alt_pattern = i % 2 == 0
             self._layer_group3.append(AffineCouplingWithCheckerboard(self.n_filters, alt_pattern))
             if i < 2:
                 self._layer_group3.append(ActNorm())
@@ -207,13 +208,13 @@ class RealNVPModel(tf.keras.Model):
             z, delta_log_det = layer(z)
             log_det += delta_log_det
         z, log_det = self.squeeze(z), self.squeeze(log_det)
-        # for layer in self._layer_group2:
-        #     z, delta_log_det = layer(z)
-        #     log_det += delta_log_det
-        z, log_det = self.unsqueeze(z), self.unsqueeze(log_det)
-        for layer in self._layer_group3:
+        for layer in self._layer_group2:
             z, delta_log_det = layer(z)
             log_det += delta_log_det
+        z, log_det = self.unsqueeze(z), self.unsqueeze(log_det)
+        # for layer in self._layer_group3:
+        #     z, delta_log_det = layer(z)
+        #     log_det += delta_log_det
         return z, log_det
 
     def inverse(self, zs):
@@ -227,11 +228,11 @@ class RealNVPModel(tf.keras.Model):
         # go through layers of forward pass (call()) in reverse calling .inverse()
         # swap squeeze and unsqueeze
         x = zs
-        for layer in reversed(self._layer_group3):
-            x = layer.inverse(x)
-        x = self.squeeze(x)
-        # for layer in reversed(self._layer_group2):
+        # for layer in reversed(self._layer_group3):
         #     x = layer.inverse(x)
+        x = self.squeeze(x)
+        for layer in reversed(self._layer_group2):
+            x = layer.inverse(x)
         x = self.unsqueeze(x)
         for layer in reversed(self._layer_group1):
             x = layer.inverse(x)
@@ -307,7 +308,7 @@ class ActNorm(tf.keras.layers.Layer):
         :param zs: z inputs (bs, h, w, c)
         :return: x outputs
         """
-        return (zs - self._bias) * tf.exp(self._log_scale)
+        return (zs - self._bias) * tf.exp(-self._log_scale)
 
 
 class Squeeze(tf.keras.layers.Layer):
@@ -678,11 +679,16 @@ def preprocess(data, n, alpha=0.05):
     :param alpha: hyper param, default=0.05 as paper
     :return: same shape as input, preprocessed
     """
+    # TODO: return a log det from preprocess?
     # dequantization
     data = data + np.random.random(np.shape(data))
     # logit trick
     data = logit_trick(data, n, alpha)
-    return data
+    # account for preprocessing
+    log_det = tf.cast(tf.nn.softplus(data) + tf.nn.softplus(-data), tf.float32) + tf.math.log(1.-alpha) \
+              - tf.math.log(tf.cast(n, tf.float32))
+    log_det = tf.reduce_sum(log_det, [1, 2, 3])
+    return data, log_det
 
 
 def squeeze_test(n, bs, c):
@@ -723,10 +729,10 @@ if __name__ == "__main__":
 
     bs = 64
     x = np.stack([np.eye(h) * np.random.randint(0, n, (h,))] * bs * c).reshape((bs, h, w, c))
-    x = preprocess(x, n)
+    x, log_det = preprocess(x, n)
 
     for i in range(150):
-        loss = real_nvp.train(x).numpy()
+        loss = real_nvp.train(x, log_det).numpy()
         if i % 10 == 0:
             print(loss)
             interp = real_nvp.interpolate(x[:2], x[2:4], 4).numpy()
