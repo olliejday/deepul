@@ -1,34 +1,6 @@
+import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
-import numpy as np
-
-
-class AdamLRSchedule:
-    def __init__(self, start_lr, end_lr, n_steps):
-        """
-        Warm up the learning rate in the optimizer
-        From 0 to steps, linearly interpolates between start_lr and end_lr, then onwards uses end_lr
-        :param start_lr: start learning rate
-        :param end_lr: end learning rate
-        :param n_steps: number of steps to warm up in
-        """
-        self.n_steps = n_steps
-        # n_steps-2 bc the learning rate steps include endpoints as steps whereas lin_interp() does not
-        self.lrs = linear_interpolate(start_lr, end_lr, n_steps - 2)
-        # init optimiser and step count
-        self.optimiser = None
-        self.step = 0
-
-    def __call__(self):
-        """
-        :return: tf.optimizers.Adam object with current learning rate at step
-        """
-        # linearly interpolate up to n_steps, otherwise keep same Adam object so it can use momentum
-        if self.step < self.n_steps:
-            lr = self.lrs[self.step]
-            self.optimiser = tf.optimizers.Adam(lr)
-        self.step += 1
-        return self.optimiser
 
 
 def linear_interpolate(a, b, n):
@@ -45,41 +17,50 @@ def linear_interpolate(a, b, n):
     return [a + (b - a) * (i / n) for i in range(n + 1)]
 
 
+def get_input_shape(inputs):
+    """
+    Splits input shape into vars
+    :param inputs: x (bs, h, w, c)
+    :return: bs, h, w, c
+    """
+    input_shape = tf.shape(inputs)
+    bs, h, w, c = input_shape[0], input_shape[1], input_shape[2], input_shape[3]
+    return bs, h, w, c
+
+
 class RealNVP:
-    def __init__(self, H, W, C, N, lr=5e-4, clip_norm=1.):
+    def __init__(self, H, W, C, N, lr=5e-4, clip_norm=0.1):
         """
         :param H, W, C: the height, width and number channels of image input
         :param N: number of values each variable (channel of pixel) can take
         :param clip_norm: clip gradient norm before update
         """
-        # warm up 200 steps
-        self.optimiser = AdamLRSchedule(lr / 10, lr, 2)
+        self.optimiser = tf.optimizers.Adam(learning_rate=lr)
         self.clip_norm = clip_norm
         self.N = N
         self.H, self.W, self.C = H, W, C
         self.n_vars = H * W * C
         self.model = self.setup_model()
 
-    def train(self, x, log_det_x):
+    def train(self, x):
         """
         x, log_det_x the inputs and the log_det to account for preprocessing
         Run training step
         Returns loss for batch (1,)
         """
         with tf.GradientTape() as tape:
-            loss = self.loss(x, log_det_x)
+            loss = self.loss(x)
         grads = tape.gradient(loss, self.model.trainable_variables)
         grads, _ = tf.clip_by_global_norm(grads, self.clip_norm)
-        # get the optimiser for this step
-        optimiser = self.optimiser()
-        optimiser.apply_gradients(zip(grads, self.model.trainable_variables))
+        self.optimiser.apply_gradients(zip(grads, self.model.trainable_variables))
         # update steps for learning rate schedule
         return loss
 
     def setup_model(self):
         return RealNVPModel(self.N)
 
-    def loss(self, x, log_det_x):
+    @tf.function
+    def loss(self, x):
         """
         Returns negative log prob for batch (1,) in nats / dim
         We scale (in logs) based on preprocessing (scale_loss)
@@ -88,7 +69,7 @@ class RealNVP:
         log_p_x = self.log_p_x(x)
         # log_p_x is (bs,) summed over vars so need to get mean over number of vars for nats / dim
         # scale (in log space) to account for preprocessing scaling
-        return - tf.reduce_mean(log_p_x + log_det_x) / self.n_vars
+        return - tf.reduce_mean(log_p_x) / self.n_vars
 
     def log_p_x(self, x):
         """
@@ -114,6 +95,7 @@ class RealNVP:
         z, _ = self.model(x)
         return z
 
+    @tf.function
     def interpolate(self, im1, im2, n):
         """
         Interpolate between two images
@@ -125,7 +107,7 @@ class RealNVP:
         """
         im1 = tf.cast(im1, tf.float32)
         im2 = tf.cast(im2, tf.float32)
-        bs, h, w, c = tf.shape(im1)
+        bs, h, w, c = get_input_shape(im1)
         # get z values
         z1 = self.f_x(im1)
         z2 = self.f_x(im2)
@@ -142,6 +124,7 @@ class RealNVP:
         xs_endpoints = tf.reshape(xs_endpoints, (bs * (n + 2), h, w, c))
         return xs_endpoints
 
+    @tf.function
     def sample(self, n):
         """
         Sample n images
@@ -212,9 +195,9 @@ class RealNVPModel(tf.keras.Model):
             z, delta_log_det = layer(z)
             log_det += delta_log_det
         z, log_det = self.unsqueeze(z), self.unsqueeze(log_det)
-        # for layer in self._layer_group3:
-        #     z, delta_log_det = layer(z)
-        #     log_det += delta_log_det
+        for layer in self._layer_group3:
+            z, delta_log_det = layer(z)
+            log_det += delta_log_det
         return z, log_det
 
     def inverse(self, zs):
@@ -228,8 +211,8 @@ class RealNVPModel(tf.keras.Model):
         # go through layers of forward pass (call()) in reverse calling .inverse()
         # swap squeeze and unsqueeze
         x = zs
-        # for layer in reversed(self._layer_group3):
-        #     x = layer.inverse(x)
+        for layer in reversed(self._layer_group3):
+            x = layer.inverse(x)
         x = self.squeeze(x)
         for layer in reversed(self._layer_group2):
             x = layer.inverse(x)
@@ -316,9 +299,8 @@ class Squeeze(tf.keras.layers.Layer):
     Squeeze - reshape to channels by dividing into 2 x 2 x c sub squares and then flattening each to 1 x 1 x 4c
     [b, h, w, c] --> [b, h//2, w//2, c*4]
     """
-
     def call(self, inputs, **kwargs):
-        bs, h, w, c = tf.shape(inputs)
+        bs, h, w, c = get_input_shape(inputs)
         # TODO: simplify un/squeeze?
         inputs_sub_sq = tf.reshape(inputs, (bs, h // 2, 2, w // 2, 2, c))
         return tf.reshape(tf.transpose(inputs_sub_sq, (0, 1, 3, 5, 2, 4)), (bs, h // 2, w // 2, 4 * c))
@@ -331,7 +313,7 @@ class Unsqueeze(tf.keras.layers.Layer):
     """
 
     def call(self, inputs, **kwargs):
-        bs, h, w, c = tf.shape(inputs)
+        bs, h, w, c = get_input_shape(inputs)
         inputs_sub_sq = tf.reshape(tf.transpose(inputs, (0, 3, 1, 2)), (bs, c // 4, 2, 2, h, w))
         return tf.reshape(tf.transpose(inputs_sub_sq, (0, 4, 2, 5, 3, 1)), (bs, h * 2, w * 2, c // 4))
 
@@ -343,10 +325,9 @@ class ResnetBlock(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         self._layers = []
-        # TODO (Note): pseudocode had in and out as padding=0 and middle as padding=1
         self._layers.append(Conv2D(self.n_filters, (1, 1), activation="relu", strides=1, padding="VALID"))
         self._layers.append(Conv2D(self.n_filters, (3, 3), activation="relu", strides=1, padding="SAME"))
-        self._layers.append(Conv2D(self.n_filters, (1, 1), activation="relu", strides=1, padding="VALID"))
+        self._layers.append(Conv2D(self.n_filters, (1, 1), strides=1, padding="VALID"))
 
     def call(self, inputs, **kwargs):
         x = inputs
@@ -355,55 +336,8 @@ class ResnetBlock(tf.keras.layers.Layer):
         return x + inputs
 
 
-# TODO: try using tfp.WeightNorm
 def Conv2D(*args, **kwargs):
     return tfp.layers.weight_norm.WeightNorm(tf.keras.layers.Conv2D(*args, **kwargs))
-
-
-class Conv2D1(tf.keras.layers.Conv2D):
-    """
-    Overwrite Conv2D with data dependent weight initialisation
-    as per Weight Normalisation, Salimans and Kingma, 2016
-    """
-
-    def __init__(self, *args, seed=123, **kwargs):
-        super().__init__(*args, **kwargs)
-        # use first call to initialise from data
-        self.is_initialised = False
-        self.seed = seed
-
-    def call(self, inputs):
-        inputs = tf.cast(inputs, tf.float32)
-        # use first call to initialise
-        if not self.is_initialised:
-            self.init_kernel(inputs)
-        return super().call(inputs)
-
-    def init_kernel(self, inputs):
-        kernel_shape = tf.shape(self.kernel)
-        bias_shape = tf.shape(self.bias)
-        # sample v from Normal mean 0 and stddev 0.05
-        v = tfp.distributions.Normal(np.zeros(kernel_shape), np.ones(kernel_shape) * 0.05).sample(1, seed=self.seed)[0]
-        v = tf.cast(v, tf.float32)
-        v_norm = tf.norm(v)
-        # pre activation, not tf uses upper strings for padding
-        t = tf.nn.conv2d(inputs, v / v_norm, strides=self.strides, padding=self.padding.upper())
-        # get statistics over filters
-        mean_t = tf.reduce_mean(t, axis=[0, 1, 2])
-        stddev_t = tf.math.reduce_std(t, axis=[0, 1, 2])
-        # params to init weights
-        g = 1. / stddev_t
-        b = - mean_t / stddev_t
-        # init weights
-        self.kernel = tf.Variable(v * g / v_norm, name="kernel", trainable=True)
-        self.bias = tf.Variable(b, name="bias", trainable=True)
-        # check ok
-        tf.assert_equal(tf.shape(self.kernel), kernel_shape,
-                        "Kernel init to wrong size. Was {}, now {}".format(tf.shape(self.kernel), kernel_shape))
-        tf.assert_equal(tf.shape(self.bias), bias_shape,
-                        "Bias init to wrong size. Was {}, now {}".format(tf.shape(self.bias), bias_shape))
-        # initialised ok
-        self.is_initialised = True
 
 
 class SimpleResnet(tf.keras.layers.Layer):
@@ -415,11 +349,11 @@ class SimpleResnet(tf.keras.layers.Layer):
 
     def build(self, input_shape, **kwargs):
         self._layers = []
-        # TODO (Note): pseudocode has padding=1 what does this mean in tf - think it could be same as this means output same size
         self._layers.append(Conv2D(self.n_filters, (3, 3), strides=1, padding="SAME",
                                    activation="relu"))
         for _ in range(self.n_layers):
             self._layers.append(ResnetBlock(self.n_filters))
+        self._layers.append(tf.keras.layers.Activation("relu"))
         self._layers.append(Conv2D(self.n_out, (3, 3), strides=1, padding="SAME"))
 
     def call(self, x, **kwargs):
@@ -455,8 +389,8 @@ class AffineCoupling(tf.keras.layers.Layer):
         if self.alt_pattern:
             mask = 1. - mask
         self.mask = mask
-        self._scale = self.add_weight(name="scale", shape=(1,))
-        self._scale_shift = self.add_weight(name="scale", shape=(1,))
+        self._scale = self.add_weight(name="scale", shape=(1,), initializer=tf.zeros_initializer())
+        self._scale_shift = self.add_weight(name="scale_shit", shape=(1,), initializer=tf.zeros_initializer())
         # want same shape as input, double output size for t and s
         n_out = input_shape[-1]
         self.resnet = SimpleResnet(n_out * 2, self.n_filters)
@@ -471,22 +405,6 @@ class AffineCoupling(tf.keras.layers.Layer):
         # element wise mask
         log_scale, t = self.get_scale_and_shift(x)
         z = x * tf.exp(log_scale) + t
-
-        # TODO: del for debug
-        def get_stats(a):
-            return (tf.reduce_min(a, [0, 1, 2]).numpy(), tf.reduce_max(a, [0, 1, 2]).numpy())
-
-        def get_mean_std(a):
-            return (tf.reduce_mean(a, axis=[0, 1, 2]).numpy(), tf.math.reduce_std(a, axis=[0, 1, 2]).numpy())
-
-        x_mu = get_mean_std(x)
-        x_stats = get_stats(x)
-        zs_mu = get_mean_std(z)
-        zs_stats = get_stats(z)
-        weights_list = [w.numpy() for w in self.trainable_variables]
-        weights_stats = (np.min([np.min(w) for w in weights_list]), np.max([np.min(w) for w in weights_list]),
-                         np.mean([np.min(w) for w in weights_list]), np.std([np.min(w) for w in weights_list]))
-        ###
         return z, log_scale
 
     def inverse(self, zs):
@@ -499,10 +417,6 @@ class AffineCoupling(tf.keras.layers.Layer):
         log_scale, t = self.get_scale_and_shift(zs)
         # inverse flow
         x = (zs - t) * tf.exp(-log_scale)
-        # TODO: del for debug
-        x_mu = tf.reduce_mean(x, axis=[0, 1, 2])
-        zs_mu = tf.reduce_mean(zs, axis=[0, 1, 2])
-        ###
         return x
 
     def get_scale_and_shift(self, x):
@@ -534,161 +448,142 @@ class AffineCouplingWithCheckerboard(AffineCoupling):
         return mask
 
 
-# class AffineCouplingWithChannel(AffineCoupling):
-#     # TODO: should mask be all ones and split the inputs to forward instead? does this o/w mean the later channels will be half zeros?
-#     def get_mask(self, input_shape):
-#         mask = np.ones(input_shape[1:])
-#         # mask out last half channel
-#         mask[:, :, input_shape[-1] // 2:] = 0.
-#         return mask
+class AffineCouplingWithChannel(AffineCoupling):
+    def get_mask(self, input_shape):
+        mask = np.ones(input_shape[1:])
+        # mask out last half channel
+        mask[:, :, input_shape[-1] // 2:] = 0.
+        return mask
 
-class AffineCouplingWithChannel(tf.keras.layers.Layer):
-    def __init__(self, n_filters, alt_pattern, **kwargs):
-        """
-        :param n_filters: number of filers each conv layer
-        :param alt_pattern: if True then masks later channels o/w masks first channels
-        """
-        super().__init__(**kwargs)
-        self.n_filters = n_filters
-        self.alt_pattern = alt_pattern
-
-    def build(self, input_shape):
-        self._scale = self.add_weight(name="scale", shape=(1,))
-        self._scale_shift = self.add_weight(name="scale", shape=(1,))
-        # double #channels to split into t and s, but we only use 1/2 of channels input so same #channels overall
-        self.n_out = input_shape[-1]
-        self.resnet = SimpleResnet(self.n_out, self.n_filters)
-
-    def call(self, x, **kwargs):
-        """
-        :param x: inputs (bs, H, W, C)
-        :return: z (bs, H', W', C'), log_det_jacobian (bs,)
-        Where z is the forward pass f(x)
-        log_det_jacobian is the log-determinant of f(x)
-        """
-        # element wise mask
-        x_on, x_off = self.apply_mask(x)
-        log_scale, t = self.get_scale_and_shift(x_off)
-        z = x_on * tf.exp(log_scale) + t
-
-        # TODO: del for debug
-        def get_stats(a):
-            return (tf.reduce_min(a, [0, 1, 2]).numpy(), tf.reduce_max(a, [0, 1, 2]).numpy())
-
-        def get_mean_std(a):
-            return (tf.reduce_mean(a, axis=[0, 1, 2]).numpy(), tf.math.reduce_std(a, axis=[0, 1, 2]).numpy())
-
-        x_mu = get_mean_std(x)
-        x_stats = get_stats(x)
-        zs_mu = get_mean_std(z)
-        zs_stats = get_stats(z)
-        weights_list = [w.numpy() for w in self.trainable_variables]
-        weights_stats = (np.min([np.min(w) for w in weights_list]), np.max([np.min(w) for w in weights_list]),
-                         np.mean([np.min(w) for w in weights_list]), np.std([np.min(w) for w in weights_list]))
-        ###
-        return self.join_mask(z, x_off), self.join_mask(log_scale, tf.zeros_like(log_scale))
-
-    def inverse(self, zs):
-        """
-        Inverse flow x = f^-1(z)
-        :param zs: z inputs (bs, h, w, c)
-        :return: x outputs
-        """
-        z_on, z_off = self.apply_mask(zs)
-        log_scale, t = self.get_scale_and_shift(z_off)
-        # inverse flow
-        x = (z_on - t) * tf.exp(-log_scale)
-        # TODO: del for debug
-        x_mu = tf.reduce_mean(x, axis=[0, 1, 2])
-        zs_mu = tf.reduce_mean(zs, axis=[0, 1, 2])
-        ###
-        return self.join_mask(x, z_off)
-
-    def get_scale_and_shift(self, x_on):
-        """
-        Get log_scale and shift, t, by processing outputs of resnet
-        :param x: inputs to resnet, can be Z OR X! Masked to on channels
-        :return: log_scale, t
-        """
-        resnet = self.resnet(x_on)
-        log_scale, t = tf.split(resnet, 2, axis=-1)
-        log_scale = self._scale * tf.tanh(log_scale) + self._scale_shift
-        return log_scale, t
-
-    def apply_mask(self, x):
-        """
-        Masks input channel wise
-        Either first n/2 are 1s and last 0s or reversed in alt masking
-        :param x: X OR Z, inputs to mask
-        :return: x_on, x_off the masked as 1s and 0s respectively
-        """
-        # TODO: right way round? - pretty sure masking is right way now
-        if self.alt_pattern:
-            x_off, x_on = tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
-            return x_on, x_off
-        else:
-            return tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
-
-    def join_mask(self, x_on, x_off):
-        """
-        Joins outputs with the masked off inputs
-        Order depends on masking order
-        Both inputs can be Xs or Zs but in this model should be different
-        :param x_on: model outputs or pixels to replace x_on in masking (1)
-        :param x_off: data inputs that were masked off, x_off in masking (0)
-        :return: x, joined data and outputs
-        """
-        if self.alt_pattern:
-            return tf.concat([x_off, x_on], axis=-1)
-        else:
-            return tf.concat([x_on, x_off], axis=-1)
+# class AffineCouplingWithChannel(tf.keras.layers.Layer):
+#     def __init__(self, n_filters, alt_pattern, **kwargs):
+#         """
+#         :param n_filters: number of filers each conv layer
+#         :param alt_pattern: if True then masks later channels o/w masks first channels
+#         """
+#         super().__init__(**kwargs)
+#         self.n_filters = n_filters
+#         self.alt_pattern = alt_pattern
+#
+#     def build(self, input_shape):
+#         self._scale = self.add_weight(name="scale", shape=(1,))
+#         self._scale_shift = self.add_weight(name="scale_shit", shape=(1,))
+#         # double #channels to split into t and s, but we only use 1/2 of channels input so same #channels overall
+#         self.n_out = input_shape[-1]
+#         self.resnet = SimpleResnet(self.n_out, self.n_filters)
+#
+#     def call(self, x, **kwargs):
+#         """
+#         :param x: inputs (bs, H, W, C)
+#         :return: z (bs, H', W', C'), log_det_jacobian (bs,)
+#         Where z is the forward pass f(x)
+#         log_det_jacobian is the log-determinant of f(x)
+#         """
+#         # element wise mask
+#         x_on, x_off = self.apply_mask(x)
+#         log_scale, t = self.get_scale_and_shift(x_off)
+#         z = x_on * tf.exp(log_scale) + t
+#         return self.join_mask(z, x_off), self.join_mask(log_scale, tf.zeros_like(log_scale))
+#
+#     def inverse(self, zs):
+#         """
+#         Inverse flow x = f^-1(z)
+#         :param zs: z inputs (bs, h, w, c)
+#         :return: x outputs
+#         """
+#         z_on, z_off = self.apply_mask(zs)
+#         log_scale, t = self.get_scale_and_shift(z_off)
+#         # inverse flow
+#         x = (z_on - t) * tf.exp(-log_scale)
+#         return self.join_mask(x, z_off)
+#
+#     def get_scale_and_shift(self, x_on):
+#         """
+#         Get log_scale and shift, t, by processing outputs of resnet
+#         :param x: inputs to resnet, can be Z OR X! Masked to on channels
+#         :return: log_scale, t
+#         """
+#         resnet = self.resnet(x_on)
+#         log_scale, t = tf.split(resnet, 2, axis=-1)
+#         log_scale = self._scale * tf.tanh(log_scale) + self._scale_shift
+#         return log_scale, t
+#
+#     def apply_mask(self, x):
+#         """
+#         Masks input channel wise
+#         Either first n/2 are 1s and last 0s or reversed in alt masking
+#         :param x: X OR Z, inputs to mask
+#         :return: x_on, x_off the masked as 1s and 0s respectively
+#         """
+#         if self.alt_pattern:
+#             x_off, x_on = tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
+#             return x_on, x_off
+#         else:
+#             return tf.split(x, (self.n_out // 2, self.n_out - self.n_out // 2), axis=-1)
+#
+#     def join_mask(self, x_on, x_off):
+#         """
+#         Joins outputs with the masked off inputs
+#         Order depends on masking order
+#         Both inputs can be Xs or Zs but in this model should be different
+#         :param x_on: model outputs or pixels to replace x_on in masking (1)
+#         :param x_off: data inputs that were masked off, x_off in masking (0)
+#         :return: x, joined data and outputs
+#         """
+#         if self.alt_pattern:
+#             return tf.concat([x_off, x_on], axis=-1)
+#         else:
+#             return tf.concat([x_on, x_off], axis=-1)
 
 
-def logit_trick(x, n, a=0.05):
+def logit_trick(x, n, a=0.05, b=0.9):
     """
     logit trick from RealNVP (Dinh et al) Section 4.1
     :param x: inputs (in data-space)
     :param n: number of values x can take
-    :param a: alpha hyper param, default=0.05 as paper
-    :return: same shape as x
+    :param a: hyper param, default=0.05 as paper
+    :param b: hyper param, default=0.05 as paper
+    :return: same shape as x, numpy
     """
     # pre-logit
-    p = a + (1 - a) * x / n
+    p = a + b * x / n
     # log odds function
     return np.log(p) - np.log(1 - p)
 
 
-def inverse_logit_trick(y, n, a=0.05):
+def inverse_logit_trick(y, n, a=0.05, b=0.9):
     """
     inverse of logit trick to map back to data
     :param y: inputs (in logit-trick-space)
     :param n: number of values x can take
-    :param a: alpha hyper param, default=0.05 as paper
-    :return: same shape as y
+    :param a: hyper param, default=0.05 as paper
+    :param b: hyper param, default=0.05 as paper
+    :return: same shape as y, numpy
     """
     # sigmoid is inverse logit function
-    p = tf.nn.sigmoid(y)
-    return n * (p - a) / (1 - a)
+    p = tf.nn.sigmoid(y).numpy()
+    return n * (p - a) / b
 
 
-def preprocess(data, n, alpha=0.05):
+def preprocess(data, n, dq=True):
     """
     Preprocess the data - dequantise and logit trick from RealNVP (Dinh et al) Section 4.1
     :param data: input data (N, H, W, C) N examples, H,W,C image shape
     :param n: number of values each variable can take on
-    :param alpha: hyper param, default=0.05 as paper
+    :param dq: bool, whether to dequatise data, defaults True
     :return: same shape as input, preprocessed
     """
-    # TODO: return a log det from preprocess?
+    data = tf.cast(data, tf.float32)
     # dequantization
-    data = data + np.random.random(np.shape(data))
+    if dq:
+        data = data + np.random.random(np.shape(data))
     # logit trick
-    data = logit_trick(data, n, alpha)
+    data = logit_trick(data, n)
     # account for preprocessing
-    log_det = tf.cast(tf.nn.softplus(data) + tf.nn.softplus(-data), tf.float32) + tf.math.log(1.-alpha) \
-              - tf.math.log(tf.cast(n, tf.float32))
-    log_det = tf.reduce_sum(log_det, [1, 2, 3])
-    return data, log_det
+    # log_det = tf.cast(tf.nn.softplus(data) + tf.nn.softplus(-data), tf.float32) + tf.math.log(1.-alpha) \
+    #           - tf.math.log(tf.cast(n, tf.float32))
+    # log_det = tf.reduce_sum(log_det, [1, 2, 3])
+    return data
 
 
 def squeeze_test(n, bs, c):
@@ -729,10 +624,10 @@ if __name__ == "__main__":
 
     bs = 64
     x = np.stack([np.eye(h) * np.random.randint(0, n, (h,))] * bs * c).reshape((bs, h, w, c))
-    x, log_det = preprocess(x, n)
+    x = preprocess(x, n)
 
     for i in range(150):
-        loss = real_nvp.train(x, log_det).numpy()
+        loss = real_nvp.train(x).numpy()
         if i % 10 == 0:
             print(loss)
             interp = real_nvp.interpolate(x[:2], x[2:4], 4).numpy()
