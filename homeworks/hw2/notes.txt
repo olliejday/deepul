@@ -1,4 +1,4 @@
-TODO: sort alt masking - gets an output with all masks one way but with alternating
+Sort alt masking - gets an output with all masks one way but with alternating
 
  currently images are black due to nans and infs
  channel mask last layer resnet output seems to get too large so exp overflows
@@ -30,6 +30,32 @@ For layer 1 + layer 3 both un/squeeze type 1 and 2 don't work
 
 Extensive testing on squeeze / unsqueeze it matches solution's
 
-TODO: work on nan loss - seems ok with low enough LR - is there an issue? Regularisation? LR schedule?
-TODO: factor out intermediate layer (half of) outputs see paper 3.6
-TODO: debug - get toy example to train
+# TODO: samples bad, interp ok
+    print mean and std for z in training for mine and solution code
+    run
+        changed channel layer init to zeros (think all param inits are the same now re. initial loss being higher than solutions)
+    .
+    check class by class cf solution - (have checked initialisation of parameters)
+    why initial loss much higher on mine?
+    .
+    Try higher LR
+sample zs mean 0, std 1
+interp was more like mean -0.2, std 0.8
+
+tried adding preprocess loss - not solved it
+
+tried both forms of channel masking (mask or split inputs)
+
+ran solution code for 5 epochs and samples poor, interp ok so could be training poorly?
+Ran mine for 100 iters with same train code and hyperparams as solns - still bad samples, but loss goes down much slower too
+
+comparing masking
+both maskings are the same but with inverted "type" argument ie. type=1.0 in solution is False in mine
+
+log scale init in act norm is the same
+
+samples different but not there after changes
+    invert masking argument
+    preprecoess inverse should be [0, 1] so not the scale by n part
+
+# TODO: warning about WeightNorm retrace - interp?
