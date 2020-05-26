@@ -29,7 +29,7 @@ def get_input_shape(inputs):
 
 
 class RealNVP:
-    def __init__(self, H, W, C, N, lr=5e-4, clip_norm=0.1):
+    def __init__(self, H, W, C, N, lr=5e-4, clip_norm=0.5):
         """
         :param H, W, C: the height, width and number channels of image input
         :param N: number of values each variable (channel of pixel) can take
@@ -107,7 +107,6 @@ class RealNVP:
         """
         im1 = tf.cast(im1, tf.float32)
         im2 = tf.cast(im2, tf.float32)
-        bs, h, w, c = get_input_shape(im1)
         # get z values
         z1 = self.f_x(im1)
         z2 = self.f_x(im2)
@@ -115,13 +114,13 @@ class RealNVP:
         zs = linear_interpolate(z1, z2, n)[1:-1]
         # flatten n interpolations into batch for passing to model.inv()
         # careful to gather in batches not in interpolations
-        zs = tf.reshape(tf.transpose(zs, (1, 0, 2, 3, 4)), (bs * n, h, w, c))
+        zs = tf.reshape(tf.transpose(zs, (1, 0, 2, 3, 4)), (-1, self.H, self.W, self.C))
         # generate images
         xs = self.model.inverse(zs)
         # add endpoints
-        xs_batches = tf.reshape(xs, (bs, n, h, w, c))
+        xs_batches = tf.reshape(xs, (-1, n, self.H, self.W, self.C))
         xs_endpoints = tf.concat([tf.expand_dims(im1, 1), xs_batches, tf.expand_dims(im2, 1)], axis=1)
-        xs_endpoints = tf.reshape(xs_endpoints, (bs * (n + 2), h, w, c))
+        xs_endpoints = tf.reshape(xs_endpoints, (-1, self.H, self.W, self.C))
         return xs_endpoints
 
     @tf.function
@@ -155,7 +154,7 @@ class RealNVPModel(tf.keras.Model):
         # Model from paper Dinh et al, architecture from course homework handout
         self._layer_group1 = []
         for i in range(4):
-            # use alternate pattern (inverse mask) on even layers
+            # use alternate pattern (inverse mask)
             alt_pattern = i % 2 != 0
             self._layer_group1.append(AffineCouplingWithCheckerboard(self.n_filters, alt_pattern))
             # no act norm last layer
@@ -317,6 +316,10 @@ class Unsqueeze(tf.keras.layers.Layer):
         return tf.reshape(tf.transpose(inputs_sub_sq, (0, 4, 2, 5, 3, 1)), (bs, h * 2, w * 2, c // 4))
 
 
+def Conv2D(*args, **kwargs):
+    return tfp.layers.weight_norm.WeightNorm(tf.keras.layers.Conv2D(*args, **kwargs))
+
+
 class ResnetBlock(tf.keras.layers.Layer):
     def __init__(self, n_filters=128, **kwargs):
         super().__init__(**kwargs)
@@ -333,10 +336,6 @@ class ResnetBlock(tf.keras.layers.Layer):
         for layer in self._layers:
             x = layer(x)
         return x + inputs
-
-
-def Conv2D(*args, **kwargs):
-    return tfp.layers.weight_norm.WeightNorm(tf.keras.layers.Conv2D(*args, **kwargs))
 
 
 class SimpleResnet(tf.keras.layers.Layer):
@@ -469,7 +468,7 @@ class AffineCouplingWithChannel(tf.keras.layers.Layer):
         self._scale_shift = self.add_weight(name="scale_shit", shape=(1,), initializer=tf.zeros_initializer())
         # double #channels to split into t and s, but we only use 1/2 of channels input so same #channels overall
         self.n_out = input_shape[-1]
-        self.resnet = SimpleResnet(self.n_out, self.n_filters)
+        self.resnet = SimpleResnet(self.n_out, self.n_filters)  # TODO: n_out * 2?
 
     def call(self, x, **kwargs):
         """
@@ -547,17 +546,17 @@ def logit_trick(x, n, a=0.05, b=0.9):
     # pre-logit
     p = a + b * x / n
     # log odds function
-    return np.log(p) - np.log(1 - p)
+    return np.log(p) - np.log(1. - p)
 
 
-def inverse_logit_trick(y, n, a=0.05, b=0.9):
+def inverse_logit_trick(y, a=0.05, b=0.9):
     """
     inverse of logit trick to map back to data
     :param y: inputs (in logit-trick-space)
     :param n: number of values x can take
     :param a: hyper param, min value
     :param b: hyper param, max value
-    :return: same shape as y, numpy
+    :return: same shape as y, numpy range [0, 1] (not [0, n])
     """
     # sigmoid is inverse logit function
     p = tf.nn.sigmoid(y).numpy()

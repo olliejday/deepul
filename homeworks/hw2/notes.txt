@@ -31,13 +31,12 @@ For layer 1 + layer 3 both un/squeeze type 1 and 2 don't work
 Extensive testing on squeeze / unsqueeze it matches solution's
 
 # TODO: samples bad, interp ok
-    print mean and std for z in training for mine and solution code
-    run
-        changed channel layer init to zeros (think all param inits are the same now re. initial loss being higher than solutions)
+    *** compare affine channel outs to same ins and review code - seems to be different in current tests
+    affine channel simpleresnet should be n_out * 2?
     .
-    check class by class cf solution - (have checked initialisation of parameters)
     why initial loss much higher on mine?
-    .
+    Try longer training run
+    Conv padding?
     Try higher LR
 sample zs mean 0, std 1
 interp was more like mean -0.2, std 0.8
@@ -57,5 +56,21 @@ log scale init in act norm is the same
 samples different but not there after changes
     invert masking argument
     preprecoess inverse should be [0, 1] so not the scale by n part
+
+samples not changed
+    changed channel layer init to zeros (think all param inits are the same now re. initial loss being higher than solutions)
+    print mean and std for z in training for mine and solution code
+    also changed clip norm to 0.5
+
+checking class by class reviewed code compared to mine visually (ordered by solution file)
+    WeightNormConv2d
+    ActNorm
+    ResNetBlock
+    SimpleRes
+    RealNVP
+    Solver
+Comparing outputs of affine coupling classes (taking out the resnet parts and ensuring same inits)
+Affine checkerboard the same!
+
 
 # TODO: warning about WeightNorm retrace - interp?
